@@ -1,0 +1,32 @@
+[Unit]
+Description=Gluetun — VPN egress for the movies/TV/anime video sources
+After=network-online.target
+
+[Container]
+Image=docker.io/qmcgaw/gluetun:latest
+ContainerName=gluetun
+# WireGuard/OpenVPN tunnel inside the container's own netns (rootless-safe).
+AddCapability=NET_ADMIN
+AddDevice=/dev/net/tun
+# Provider credentials + tunnel settings live OUTSIDE any git repo (chmod 600):
+EnvironmentFile=%h/.config/gluetun/gluetun.env
+# Built-in HTTP proxy: everything sent through it egresses via the tunnel, and
+# gluetun's internal firewall drops ALL non-tunnel egress — so a dropped VPN
+# means requests fail instead of leaking. This is the kill-switch the movie/tv/
+# anime video pipeline relies on.
+Environment=HTTPPROXY=on
+Environment=HTTPPROXY_LISTENING_ADDRESS=:8888
+# Control server (health / public-ip endpoints used by the failsafe check).
+Environment=HTTP_CONTROL_SERVER_ADDRESS=:8000
+# Loopback-only on the host; 8888/8000 are taken by other services → 8889/8018.
+PublishPort=127.0.0.1:8889:8888
+PublishPort=127.0.0.1:8018:8000
+
+[Service]
+Restart=always
+RestartSec=10
+# First start pulls the image.
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target

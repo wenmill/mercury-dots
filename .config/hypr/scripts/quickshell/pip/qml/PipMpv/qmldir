@@ -1,0 +1,8 @@
+module PipMpv
+linktarget pipmpvplugin
+optional plugin pipmpvplugin
+classname PipMpvPlugin
+typeinfo pipmpv.qmltypes
+prefer :/qt/qml/PipMpv/
+depends QtQuick
+

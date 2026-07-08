@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# youtube provider — search via yt-dlp, play a video id in the PiP (ytdl hook).
+set -uo pipefail
+: "${VIDEO_DIR:=$(cd "$(dirname "$0")/.." && pwd)}"
+source "$VIDEO_DIR/lib/common.sh"
+
+verb="${1:-}"; shift 2>/dev/null || true
+case "$verb" in
+    capabilities) echo "search play resolve" ;;
+    search)
+        q="$*"; [ -n "$q" ] || exit 0
+        if ! command -v yt-dlp >/dev/null 2>&1; then echo "__NOYTDLP__"; exit 0; fi
+        # One TSV line per result: <id>\t<title>\t<channel>\t<duration_s>
+        exec yt-dlp --flat-playlist --no-warnings --ignore-errors \
+            --print $'%(id)s\t%(title)s\t%(channel)s\t%(duration)s' "ytsearch24:$q"
+        ;;
+    resolve)
+        id="${1:?video id required}"
+        printf '{"url":"https://www.youtube.com/watch?v=%s"}\n' "$id"
+        ;;
+    play)
+        id="${1:?video id required}"
+        vlog "youtube play :: $id"
+        vid_load "https://www.youtube.com/watch?v=$id"
+        ;;
+    *) echo "youtube: unknown verb '$verb'" >&2; exit 2 ;;
+esac

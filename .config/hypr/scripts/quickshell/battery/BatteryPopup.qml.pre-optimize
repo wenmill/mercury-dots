@@ -1,0 +1,2543 @@
+import QtQuick
+import QtQuick.Layouts
+import QtQuick.Window
+import QtQuick.Controls
+import QtCore
+import Quickshell
+import Quickshell.Io
+import "../"
+
+Item {
+    id: window
+
+    // --- RECEIVE THE DBUS LIST FROM MAIN.QML ---
+    property var notifModel
+
+    // State object for collapsible notification groups
+    property var collapsedGroups: ({})
+
+    function toggleGroup(groupName) {
+        let temp = Object.assign({}, collapsedGroups);
+        temp[groupName] = !temp[groupName];
+        collapsedGroups = temp;
+    }
+
+    function isCollapsed(groupName) {
+        return collapsedGroups[groupName] === true;
+    }
+
+    // Helper: Safely clear an entire group of notifications by AppName
+    function clearGroup(appName) {
+        if (!notifModel) return;
+        for (let i = notifModel.count - 1; i >= 0; i--) {
+            if (notifModel.get(i).appName === appName) {
+                notifModel.remove(i);
+            }
+        }
+    }
+
+    // --- Responsive Scaling Logic ---
+    Scaler {
+        id: scaler
+        // Uses the physical screen width so the popup scales synchronously with the TopBar
+        currentWidth: Screen.width
+    }
+    
+    // Helper function scoped to the root Item for easy access in deeply nested elements and Canvases
+    function s(val) { 
+        return scaler.s(val); 
+    }
+
+    // -------------------------------------------------------------------------
+    // COLORS (Dynamic Matugen Palette)
+    // -------------------------------------------------------------------------
+    MatugenColors { id: _theme }
+    // Matugen palette loads async, overwriting defaults after open. Repaint the
+    // gauge canvases (and the temp-lens overlay) when the palette arrives so they
+    // come up in the right colors instead of flashing the defaults first.
+    Connections {
+        target: _theme
+        function onRawJsonChanged() {
+            if (typeof cpuCanvas !== "undefined") cpuCanvas.requestPaint();
+            if (typeof ramCanvas !== "undefined") ramCanvas.requestPaint();
+            if (typeof gpuCanvas !== "undefined") gpuCanvas.requestPaint();
+            if (typeof tempCanvas !== "undefined") tempCanvas.requestPaint();
+            if (typeof tempOverlay !== "undefined") tempOverlay.requestPaint();
+            if (typeof sideArcs !== "undefined") sideArcs.requestPaint();
+        }
+    }
+    readonly property color base: _theme.base
+    readonly property color mantle: _theme.mantle
+    readonly property color crust: _theme.crust
+    readonly property color text: _theme.text
+    readonly property color subtext0: _theme.subtext0
+    readonly property color overlay0: _theme.overlay0
+    readonly property color overlay1: _theme.overlay1
+    readonly property color surface0: _theme.surface0
+    readonly property color surface1: _theme.surface1
+    readonly property color surface2: _theme.surface2
+    
+    readonly property color mauve: _theme.mauve
+    readonly property color pink: _theme.pink
+    readonly property color red: _theme.red
+    readonly property color maroon: _theme.maroon
+    readonly property color peach: _theme.peach
+    readonly property color yellow: _theme.yellow
+    readonly property color green: _theme.green
+    readonly property color teal: _theme.teal
+    readonly property color sapphire: _theme.sapphire
+    readonly property color blue: _theme.blue
+
+    // -------------------------------------------------------------------------
+    // CACHE (Eliminates startup delay visually)
+    // -------------------------------------------------------------------------
+    Settings {
+        id: widgetCache
+        category: "SystemMonitorCache"
+        property int cpuUsage: 0
+        property int ramUsage: 0
+        property int diskUsage: 0
+        property int gpuUsage: 0
+        property int gpuVram: 0
+        property int cpuTemp: 0
+        property int gpuTemp: 0
+        property string powerProfile: "balanced"
+        property int upHours: 0
+        property int upMins: 0
+        property real sysVolume: 0
+        property bool sysMuted: false
+        property real sysBrightness: 0
+        property string currentUserName: "User"
+    }
+
+    // -------------------------------------------------------------------------
+    // STATE & POLLING
+    // -------------------------------------------------------------------------
+    property int cpuUsage: widgetCache.cpuUsage
+    property int ramUsage: widgetCache.ramUsage
+    property int diskUsage: widgetCache.diskUsage
+    // ── Side-arc data ──────────────────────────────────────────────────────
+    // Percentages (0–100) drawn as split radial arcs flanking the gauges.
+    //   Left  : top = CPU fan, bottom = GPU fan  (speed as % of max RPM)
+    //   Right : top = system storage, bottom = NAS storage  (used %)
+    property int cpuFanPct: 0
+    property int gpuFanPct: 0
+    property int sysStoragePct: 0
+    property int nasStoragePct: 0
+    property int gpuUsage: widgetCache.gpuUsage
+    property int gpuVram: widgetCache.gpuVram     // GPU VRAM usage %
+    property int cpuTemp: widgetCache.cpuTemp     // CPU temperature °C
+    property int gpuTemp: widgetCache.gpuTemp     // GPU temperature °C
+    property int uptimeSec: 0                      // live uptime in seconds (2-week gauge)
+
+    property string powerProfile: widgetCache.powerProfile
+    
+    property int upHours: widgetCache.upHours
+    property int upMins: widgetCache.upMins
+
+    property real sysVolume: widgetCache.sysVolume
+    property bool sysMuted: widgetCache.sysMuted
+    property real sysBrightness: widgetCache.sysBrightness
+    
+    property string currentUserName: widgetCache.currentUserName
+
+    property bool dndEnabled: false
+    property string focusMode: "default"
+    property string pendingFocusMode: ""
+    property int focusEndEpoch: 0
+    property int focusSetMins: 60
+    property int focusRemainSec: 0
+    property string focusCountdown: {
+        if (focusRemainSec <= 0) return "";
+        let m = Math.floor(focusRemainSec / 60);
+        let s = focusRemainSec % 60;
+        return m + ":" + (s < 10 ? "0" : "") + s;
+    }
+
+    // ── Fastfetch-style system info ──
+    property string sysOs: ""
+    property string sysKernel: ""
+    property string sysShell: ""
+    property string sysCpuName: ""
+    property string sysGpu: ""
+    property string sysMemory: ""
+    property string sysDiskStr: ""
+    property string sysPackages: ""
+    property string sysTerminal: ""
+    property string sysWm: ""
+    property string sysResolution: ""
+    property string sysLocale: ""
+
+    // Anti-Jitter Sync States
+    property bool isDraggingVol: false
+    property bool isDraggingBri: false
+
+    Timer { id: volSyncDelay; interval: 800; onTriggered: window.isDraggingVol = false; triggeredOnStart: true; }
+    Timer { id: briSyncDelay; interval: 800; onTriggered: window.isDraggingBri = false; triggeredOnStart: true; }
+
+    // Unified hue for Performance Profile
+    readonly property color profileStart: {
+        if (powerProfile === "performance") return window.red;
+        if (powerProfile === "power-saver") return window.green;
+        return window.blue;
+    }
+    readonly property color profileEnd: Qt.lighter(profileStart, 1.15)
+
+    // Ambient Blobs - Static for Desktop version
+    readonly property color ambientPrimary: window.mauve
+    readonly property color ambientSecondary: window.blue
+
+    // --- INIT DND STATE FROM CACHE ---
+    Process {
+        id: dndInit
+        running: true
+        command: ["bash", "-c", "mkdir -p ~/.cache && cat ~/.cache/qs_dnd 2>/dev/null || echo '0'"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                window.dndEnabled = (this.text.trim() === "1");
+            }
+        }
+    }
+
+    Process {
+        id: userPoller
+        command: ["bash", "-c", "echo $USER"]
+        running: true
+        stdout: StdioCollector {
+            onStreamFinished: {
+                window.currentUserName = this.text.trim();
+                widgetCache.currentUserName = window.currentUserName;
+            }
+        }
+    }
+
+    // Network rate needs two samples; keep the previous byte counters + time.
+    property real _netPrevRx: -1
+    property real _netPrevTx: -1
+    property real _netPrevT: 0
+    property string netDownStr: "—"
+    property string netUpStr: "—"
+    Process {
+        id: sysPoller
+        // HIGHLY ROBUST BASH COMMANDS. Line order is parsed positionally below.
+        command: ["bash", "-c",
+            "vmstat 1 2 | tail -1 | awk '{print 100 - $15}' || echo '0'; " +                                   // 0 cpu%
+            "free -m | awk '/Mem:/ {print int($3/$2 * 100)}' || echo '0'; " +                                    // 1 ram%
+            "df -h / | awk 'NR==2 {print $5}' | tr -d '%' || echo '0'; " +                                       // 2 disk%
+            // 3 CPU temp (°C)
+            "ctemp=$(sensors 2>/dev/null | grep -m 1 -E 'Package id 0|Tctl|Tdie' | grep -oE '\\+[0-9]+\\.[0-9]+' | head -n1 | tr -d '+' | cut -d. -f1); [ -z \"$ctemp\" ] && ctemp=$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | head -n1 | awk '{print int($1/1000)}'); echo \"${ctemp:-0}\"; " +
+            "powerprofilesctl get 2>/dev/null || echo 'balanced'; " +                                            // 4 power profile
+            "cut -d. -f1 /proc/uptime 2>/dev/null || echo '0'; " +                                               // 5 uptime SECONDS
+            "wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null | awk '{print int($2*100), ($3==\"[MUTED]\"?\"off\":\"on\")}' || echo '0 on'; " + // 6 vol
+            "brightnessctl -m 2>/dev/null | awk -F, '{print substr($4, 1, length($4)-1)}' || echo '0'; " +       // 7 brightness
+            "cat /sys/class/drm/card*/device/gpu_busy_percent 2>/dev/null | head -1 || { nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | grep -E '^[0-9]+$' || echo '0'; }; " + // 8 gpu%
+            // 9 GPU VRAM percent: try amdgpu sysfs (used/total bytes), then nvidia-smi.
+            "vused=$(cat /sys/class/drm/card*/device/mem_info_vram_used 2>/dev/null | head -1); vtot=$(cat /sys/class/drm/card*/device/mem_info_vram_total 2>/dev/null | head -1); " +
+            "if [ -n \"$vused\" ] && [ -n \"$vtot\" ] && [ \"$vtot\" -gt 0 ]; then echo $((vused*100/vtot)); " +
+            "else nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | awk -F', ' 'NR==1{if($2>0) print int($1*100/$2); else print 0}' || echo '0'; fi; " +
+            // 10 GPU temp (°C): amdgpu edge sensor, then nvidia-smi.
+            "gtemp=$(sensors 2>/dev/null | grep -m1 -E 'edge|junction' | grep -oE '\\+[0-9]+\\.[0-9]+' | head -n1 | tr -d '+' | cut -d. -f1); [ -z \"$gtemp\" ] && gtemp=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null | head -1); echo \"${gtemp:-0}\"; " +
+            // 11 network cumulative bytes: sum rx and tx across real interfaces.
+            "rx=0; tx=0; for d in /sys/class/net/*; do n=$(basename $d); [ \"$n\" = lo ] && continue; r=$(cat $d/statistics/rx_bytes 2>/dev/null||echo 0); t=$(cat $d/statistics/tx_bytes 2>/dev/null||echo 0); rx=$((rx+r)); tx=$((tx+t)); done; echo \"$rx $tx\"; " +
+            // 12 CPU fan %: first fan RPM from `sensors`, scaled against a 3000-RPM max.
+            "crpm=$(sensors 2>/dev/null | grep -m1 -iE 'fan[0-9]*:' | grep -oE '[0-9]+' | head -n1); [ -z \"$crpm\" ] && crpm=0; echo $(( crpm > 3000 ? 100 : crpm*100/3000 )); " +
+            // 13 GPU fan %: nvidia-smi fan.speed (already %), else amdgpu pwm1 (0-255).
+            "gfan=$(nvidia-smi --query-gpu=fan.speed --format=csv,noheader,nounits 2>/dev/null | head -1 | grep -oE '[0-9]+'); if [ -z \"$gfan\" ]; then p=$(cat /sys/class/drm/card*/device/hwmon/hwmon*/pwm1 2>/dev/null | head -1); [ -n \"$p\" ] && gfan=$((p*100/255)) || gfan=0; fi; echo \"${gfan:-0}\"; " +
+            // 14 system storage used %: root filesystem.
+            "df / 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%' || echo '0'; " +
+            // 15 NAS storage used %: ADJUST the mount path below to your NAS mount.
+            "df '/mnt/nas' 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%' || echo '0'"
+        ]
+        running: true
+        stdout: StdioCollector {
+            onStreamFinished: {
+                let lines = this.text.trim().split("\n");
+                if (lines.length >= 8) {
+                    window.cpuUsage = parseInt(lines[0]) || 0;
+                    widgetCache.cpuUsage = window.cpuUsage;
+
+                    window.ramUsage = parseInt(lines[1]) || 0;
+                    widgetCache.ramUsage = window.ramUsage;
+
+                    window.diskUsage = parseInt(lines[2]) || 0;
+                    widgetCache.diskUsage = window.diskUsage;
+
+                    window.cpuTemp = parseInt(lines[3]) || 0;
+                    widgetCache.cpuTemp = window.cpuTemp;
+
+                    window.powerProfile = lines[4];
+                    widgetCache.powerProfile = window.powerProfile;
+
+                    // Uptime in seconds → hours/mins (kept for any text) + the
+                    // 2-week gauge fraction.
+                    let upSec = parseInt(lines[5]) || 0;
+                    window.uptimeSec = upSec;
+                    window.upHours = Math.floor(upSec / 3600);
+                    widgetCache.upHours = window.upHours;
+                    window.upMins = Math.floor((upSec % 3600) / 60);
+                    widgetCache.upMins = window.upMins;
+
+                    if (!window.isDraggingVol) {
+                        let volParts = (lines[6] || "0 on").trim().split(" ");
+                        window.sysVolume = parseInt(volParts[0]) || 0;
+                        widgetCache.sysVolume = window.sysVolume;
+                        window.sysMuted = (volParts[1] === "off");
+                        widgetCache.sysMuted = window.sysMuted;
+                    }
+
+                    if (!window.isDraggingBri) {
+                        window.sysBrightness = parseInt(lines[7]) || 0;
+                        widgetCache.sysBrightness = window.sysBrightness;
+                    }
+
+                    if (lines.length >= 9) {
+                        window.gpuUsage = parseInt(lines[8]) || 0;
+                        widgetCache.gpuUsage = window.gpuUsage;
+                    }
+                    if (lines.length >= 10) {
+                        window.gpuVram = parseInt(lines[9]) || 0;
+                        widgetCache.gpuVram = window.gpuVram;
+                    }
+                    if (lines.length >= 11) {
+                        window.gpuTemp = parseInt(lines[10]) || 0;
+                        widgetCache.gpuTemp = window.gpuTemp;
+                    }
+                    if (lines.length >= 12) {
+                        let nb = (lines[11] || "0 0").trim().split(" ");
+                        let rx = parseFloat(nb[0]) || 0;
+                        let tx = parseFloat(nb[1]) || 0;
+                        let now = Date.now() / 1000;
+                        if (window._netPrevRx >= 0 && now > window._netPrevT) {
+                            let dt = now - window._netPrevT;
+                            window.netDownStr = window.fmtRate((rx - window._netPrevRx) / dt);
+                            window.netUpStr = window.fmtRate((tx - window._netPrevTx) / dt);
+                        }
+                        window._netPrevRx = rx; window._netPrevTx = tx; window._netPrevT = now;
+                    }
+                    // Side-arc data (lines 12–15). Clamp to 0–100.
+                    function clampPct(v) { v = parseInt(v) || 0; return v < 0 ? 0 : (v > 100 ? 100 : v); }
+                    if (lines.length >= 16) {
+                        window.cpuFanPct = clampPct(lines[12]);
+                        window.gpuFanPct = clampPct(lines[13]);
+                        window.sysStoragePct = clampPct(lines[14]);
+                        window.nasStoragePct = clampPct(lines[15]);
+                    }
+                }
+            }
+        }
+    }
+    // Heartbeat: sysPoller has `running: true`, so it fires only ONCE when the widget is
+    // first created (and this widget is preloaded + cached, so "once" means once ever).
+    // The network up/down rate is a delta and needs a SECOND sample to compute — without
+    // a re-trigger it stays stuck at "—" forever. Re-arm the poller on an interval while
+    // the popup is actually shown (cached widgets persist hidden; `window.visible` is set
+    // true only while on the stack — see Main.qml), so we don't spawn a bash poll every
+    // tick for a hidden widget. This also makes every other live stat refresh in realtime.
+    Timer {
+        interval: 1500; repeat: true
+        running: window.visible
+        onTriggered: { sysPoller.running = false; sysPoller.running = true; }
+    }
+    // Format a bytes/sec rate compactly (B/s, KB/s, MB/s).
+    function fmtRate(bps) {
+        if (!bps || bps < 0) bps = 0;
+        if (bps < 1024) return Math.round(bps) + " B/s";
+        if (bps < 1024 * 1024) return (bps / 1024).toFixed(1) + " KB/s";
+        return (bps / (1024 * 1024)).toFixed(2) + " MB/s";
+    }
+
+    // ── 2-week maintenance gauge support ──
+    // Tick uptime forward locally so the gauge advances smoothly between polls.
+    Timer { interval: 1000; repeat: true; running: window.visible; onTriggered: {
+        if (window.uptimeSec > 0) window.uptimeSec += 1;
+        // 2-week timer → run the update (rate-limited inside maintAutoUpdate).
+        if (window.uptimeSec >= 1209600 && !window.maintAutoUpdateDone) {
+            window.maintAutoUpdateDone = true; window.maintAutoUpdate();
+        }
+    } }
+
+    property bool auditRunning: false
+    property string auditResult: ""
+    // Run arch-audit — a REAL vulnerability check against the Arch security
+    // tracker (lists installed packages with known CVEs). This is the honest
+    // alternative to "AI scans for malware", which cannot reliably detect it.
+    function runArchAudit() {
+        window.auditRunning = true; window.auditResult = "";
+        archAuditProc.command = ["bash", "-c",
+            "if ! command -v arch-audit >/dev/null 2>&1; then echo 'arch-audit not installed — run: sudo pacman -S arch-audit'; exit 0; fi; " +
+            "OUT=$(arch-audit -u 2>/dev/null); " +
+            "if [ -z \"$OUT\" ]; then echo 'No known-vulnerable packages.'; else echo \"$OUT\" | head -8; fi"
+        ];
+        archAuditProc.running = false; archAuditProc.running = true;
+    }
+    Process { id: archAuditProc; command: ["bash", "-c", "true"]
+        stdout: StdioCollector { onStreamFinished: {
+            window.auditRunning = false;
+            window.auditResult = (this.text || "").trim() || "Audit finished.";
+        }}
+    }
+    // ── System maintenance (the "update" button) ───────────────────────────
+    // Safe flow: clicking "update" runs a READ-ONLY preview (checkupdates,
+    // pacman -Qdt, arch-audit — none need root or touch the DB). The actual
+    // update/clean/orphan-removal each open a visible kitty terminal where the
+    // user types their sudo password and watches. Nothing destructive is silent.
+    property bool maintOpen: false
+    property bool maintChecking: false
+    property int  maintUpdates: 0
+    property int  maintOrphans: 0
+    property int  maintVulns: 0
+    property string maintDetail: ""
+    // ── Maintenance, fully self-contained (no external helper script) ──────────
+    // Each action's terminal script is defined here and launched directly. cachy-update
+    // (→ arch-update) is interactive, so it runs in a floating kitty; the script is
+    // base64'd so any characters survive the trip through the shell intact.
+    readonly property string maintInnerUpdate:
+        'echo "=== System Update (cachy-update) ==="\n' +
+        'if command -v cachy-update >/dev/null 2>&1; then cachy-update; else echo "cachy-update not found — falling back to pacman -Syu"; sudo pacman -Syu; fi\n' +
+        'echo; echo "=== Cleaning package cache (keep last 3) ==="\n' +
+        'sudo paccache -r\n' +
+        'echo; echo "=== Removing orphaned packages ==="\n' +
+        'ORPH=$(pacman -Qtdq 2>/dev/null)\n' +
+        'if [ -z "$ORPH" ]; then echo "No orphaned packages."; else echo "$ORPH"; sudo pacman -Rns $ORPH; fi\n' +
+        'echo; echo "=== Scanning for vulnerabilities (arch-audit) ==="\n' +
+        'if command -v arch-audit >/dev/null 2>&1; then V="$(arch-audit -u 2>/dev/null)"; [ -n "$V" ] && echo "$V" || echo "No known-vulnerable packages."; else echo "arch-audit not installed."; fi\n' +
+        'echo; echo "Done. Press enter to close."; read'
+    readonly property string maintInnerClean:
+        'echo "=== paccache -r (keep last 3 versions) ==="\n' +
+        'sudo paccache -r\n' +
+        'echo; echo "Done. Press enter to close."; read'
+    readonly property string maintInnerOrphans:
+        'echo "=== Orphaned packages ==="\n' +
+        'ORPH=$(pacman -Qtdq 2>/dev/null)\n' +
+        'if [ -z "$ORPH" ]; then echo "No orphaned packages."; else echo "$ORPH"; echo; sudo pacman -Rns $ORPH; fi\n' +
+        'echo; echo "Done. Press enter to close."; read'
+
+    // Launch a maintenance script in a floating kitty docked top-right of the focused
+    // monitor (geometry via hyprctl inline rules), then focus it.
+    function launchMaint(title, inner) {
+        var b64 = Qt.btoa(inner);
+        var cmd =
+            "mw=$(hyprctl monitors -j 2>/dev/null | jq -r 'map(select(.focused))[0].width // 1920'); " +
+            "mh=$(hyprctl monitors -j 2>/dev/null | jq -r 'map(select(.focused))[0].height // 1080'); " +
+            "side=$((mh*55/100)); kx=$((mw-side-20)); ky=70; " +
+            "hyprctl dispatch exec \"[float;size $side $side;move $kx $ky] kitty --class qs-sysmaintain --title '" + title + "' -e bash -c 'echo " + b64 + " | base64 -d | bash'\"; " +
+            "for i in $(seq 1 12); do hyprctl clients -j 2>/dev/null | grep -q qs-sysmaintain && { hyprctl dispatch focuswindow class:qs-sysmaintain >/dev/null 2>&1; break; }; sleep 0.15; done";
+        Quickshell.execDetached(["bash", "-c", cmd]);
+    }
+    function maintRun(action) {
+        if (action === "clean") launchMaint("Clean Package Cache", window.maintInnerClean);
+        else if (action === "orphans") launchMaint("Remove Orphans", window.maintInnerOrphans);
+        else launchMaint("System Update", window.maintInnerUpdate);
+    }
+
+    // Auto-run the update once when uptime crosses 2 weeks; the gate Process rate-limits
+    // it to once per ~12 days via a marker so reopening the popup can't relaunch it.
+    property bool maintAutoUpdateDone: false
+    function maintAutoUpdate() { maintAutoGate.running = false; maintAutoGate.running = true; }
+    Process {
+        id: maintAutoGate
+        command: ["bash","-c","M=~/.cache/qs_last_auto_update; N=$(date +%s); L=$(cat \"$M\" 2>/dev/null || echo 0); if [ $((N-L)) -gt 1036800 ]; then echo \"$N\" > \"$M\"; echo go; fi"]
+        stdout: StdioCollector { onStreamFinished: { if ((this.text || "").trim() === "go") window.maintRun("update"); } }
+    }
+
+    function maintCheck() {
+        window.maintOpen = true;
+        window.maintChecking = true;
+        maintCheckProc.running = false; maintCheckProc.running = true;
+    }
+    // Read-only preview — runs the checks directly (no root, touches nothing) and
+    // reports counts (first line) + a detail block (rest).
+    Process {
+        id: maintCheckProc
+        command: ["bash","-c",
+            "UPD=$(command -v checkupdates >/dev/null 2>&1 && checkupdates 2>/dev/null); UPD_N=$(printf '%s' \"$UPD\" | grep -c .); " +
+            "ORPH=$(pacman -Qtdq 2>/dev/null); ORPH_N=$(printf '%s' \"$ORPH\" | grep -c .); " +
+            "if command -v arch-audit >/dev/null 2>&1; then VULN=$(arch-audit -q --upgradable 2>/dev/null); else VULN=; fi; VULN_N=$(printf '%s' \"$VULN\" | grep -c .); " +
+            "echo \"$UPD_N $ORPH_N $VULN_N\"; " +
+            "[ -n \"$UPD\" ] && { echo \"── Updates ($UPD_N) ──\"; echo \"$UPD\"; echo; }; " +
+            "[ -n \"$ORPH\" ] && { echo \"── Orphans ($ORPH_N) ──\"; echo \"$ORPH\"; echo; }; " +
+            "if [ \"$VULN_N\" -gt 0 ]; then echo \"── Vulnerable ($VULN_N) ──\"; echo \"$VULN\"; elif command -v arch-audit >/dev/null 2>&1; then echo \"── Security ──\"; echo \"No known vulnerabilities.\"; else echo \"── Security ──\"; echo \"arch-audit not installed.\"; fi"]
+        stdout: StdioCollector { onStreamFinished: {
+            window.maintChecking = false;
+            let lines = (this.text || "").split("\n");
+            let c = (lines[0] || "").trim().split(/\s+/);
+            window.maintUpdates = parseInt(c[0]) || 0;
+            window.maintOrphans = parseInt(c[1]) || 0;
+            window.maintVulns   = parseInt(c[2]) || 0;
+            window.maintDetail  = lines.slice(1).join("\n").trim();
+        } }
+    }
+
+    // ── In-QML update console ───────────────────────────────────────────────
+    // Streams the upgrade straight into the popup (no floating terminal). Fully
+    // INTERACTIVE with NATIVE pacman confirmation: the whole run is under `sudo -S`
+    // (password read from the field first), pacman runs WITHOUT --noconfirm, and its
+    // real package list + `[Y/n]` prompts are answered by typing y/n in the field.
+    // Output is unbuffered (stdbuf -o0) and streamed LIVE (StdioCollector waitForEnd:
+    // false) so the prompt — which has no trailing newline — is actually visible.
+    property bool consoleRunning: false
+    property bool consoleDone: false
+    property bool consoleInteractive: false   // terminal input line active (sudo password + y/n prompts)
+    property bool consolePwSent: false        // first submit = the password; after that, plain text
+    property string consoleHeader: ""         // intro line set per run; the live output stream is appended to it
+    property string consoleText: ""
+    readonly property string consoleInnerUpdate:
+        'echo ">>> System update — review the package list, then answer pacman by typing  y  or  n  at the prompt below."\n' +
+        'stdbuf -o0 pacman -Syu\n' +
+        'echo; echo ">>> Cleaning package cache (keep last 3)…"\n' +
+        'paccache -r\n' +
+        'echo; echo ">>> Orphaned packages:"\n' +
+        'O=$(pacman -Qtdq 2>/dev/null); if [ -n "$O" ]; then echo "$O"; stdbuf -o0 pacman -Rns $O; else echo "  none"; fi\n' +
+        'echo; echo ">>> Vulnerability scan (arch-audit):"\n' +
+        'if command -v arch-audit >/dev/null 2>&1; then V=$(arch-audit -u 2>/dev/null); [ -n "$V" ] && echo "$V" || echo "  No known-vulnerable packages."; else echo "  arch-audit not installed."; fi\n' +
+        'echo; echo ">>> done"'
+    readonly property string consoleInnerClean:
+        'echo ">>> paccache -r (keep last 3)"\npaccache -r\necho; echo ">>> done"'
+    readonly property string consoleInnerOrphans:
+        'echo ">>> orphans"\nO=$(pacman -Qtdq 2>/dev/null); if [ -n "$O" ]; then echo "$O"; pacman -Rns $O; else echo "none"; fi\necho; echo ">>> done"'
+    readonly property string consoleInnerVuln:
+        'echo ">>> arch-audit"\nif command -v arch-audit >/dev/null 2>&1; then V=$(arch-audit -u 2>/dev/null); [ -n "$V" ] && echo "$V" || echo "No known-vulnerable packages."; else echo "arch-audit not installed."; fi\necho; echo ">>> done"'
+    // Stream any maintenance task into the in-popup console. root=true runs it under
+    // `sudo -S`, reading the password from the in-popup field via stdin — NO external
+    // polkit window (which would steal focus and dismiss the popup). root=false runs
+    // it as the current user (e.g. the read-only vuln scan).
+    function runConsole(label, inner, root) {
+        if (window.consoleRunning) return;
+        window.consoleHeader = root ? "Type your sudo password at the prompt below, then Enter.\n\n" : ("Running " + label + "…\n\n");
+        window.consoleText = window.consoleHeader;
+        window.consoleDone = false;
+        window.consoleRunning = true;
+        window.consoleInteractive = root;
+        window.consolePwSent = false;
+        // Decode + eval the script IN-PROCESS (NOT `echo … | base64 -d | bash`): piping the
+        // script into bash makes bash's — and therefore pacman's — stdin the pipe carrying
+        // the script, which reaches EOF the moment the script is read. pacman then sees EOF
+        // at its `[Y/n]` prompt and auto-proceeds with the default (never stopping), while
+        // our y/n writes go to sudo's stdin and never reach pacman. Passing the base64 as $0
+        // and `eval`-ing it keeps the executing shell (and pacman) on the REAL stdin pipe,
+        // so our writes reach pacman and it BLOCKS at the confirm prompt.
+        var b64 = Qt.btoa(inner);
+        var run = "bash -c 'eval \"$(base64 -d <<< \"$0\")\"' \"$0\"";
+        // Merge stderr into stdout (2>&1) so the single live StdioCollector captures
+        // everything, including sudo's auth errors and pacman's prompts.
+        consoleProc.command = root
+            ? ["bash","-c", "sudo -S -p '' " + run + " 2>&1", b64]
+            : ["bash","-c", run + " 2>&1", b64];
+        consoleProc.running = false; consoleProc.running = true;
+    }
+    function runConsoleUpdate() { runConsole("update", window.consoleInnerUpdate, true); }
+    Process {
+        id: consoleProc
+        stdinEnabled: true
+        // The terminal input line stays active the whole run: first Enter sends the sudo
+        // password, later Enters answer pacman's NATIVE [Y/n] prompts. Output streams LIVE via
+        // StdioCollector(waitForEnd:false) — crucial because pacman's confirm prompt has
+        // no trailing newline, so a line-based parser would hide it and the console would
+        // look non-interactive. (stderr is merged into stdout via 2>&1 in runConsole.)
+        stdout: StdioCollector {
+            id: consoleOut
+            waitForEnd: false
+            onDataChanged: window.consoleText = window.consoleHeader + this.text
+        }
+        onExited: function(exitCode, exitStatus) {
+            window.consoleRunning = false; window.consoleDone = true; window.consoleInteractive = false;
+            window.consoleText = window.consoleHeader + consoleOut.text + "\n— finished (exit " + exitCode + ") —";
+        }
+    }
+
+
+    // ── Focus mode reader + countdown ──
+    Process {
+        id: focusReader; running: true
+        command: ["bash", "-c", "cat ~/.cache/qs_focus_mode 2>/dev/null || echo 'default'"]
+        stdout: StdioCollector {
+            onStreamFinished: { window.focusMode = this.text.trim() || "default"; }
+        }
+    }
+    Process {
+        id: focusEndReader; running: true
+        command: ["bash", "-c", "cat ~/.cache/qs_focus_end 2>/dev/null || echo '0'"]
+        stdout: StdioCollector {
+            onStreamFinished: { window.focusEndEpoch = parseInt(this.text.trim()) || 0; }
+        }
+    }
+    // Countdown display only — TopBar handles the actual expiry and mode reset
+    Timer {
+        id: focusCountdownTimer
+        interval: 1000; running: window.focusMode !== "default" && window.focusEndEpoch > 0; repeat: true
+        onTriggered: {
+            let now = Math.floor(Date.now() / 1000);
+            window.focusRemainSec = Math.max(0, window.focusEndEpoch - now);
+            // If expired, re-read state (TopBar will have already reset it)
+            if (window.focusRemainSec <= 0) {
+                focusReader.running = false; focusReader.running = true;
+                focusEndReader.running = false; focusEndReader.running = true;
+            }
+        }
+    }
+
+    // ── System info poller (runs once) ──
+    Process {
+        id: infoPoller
+        running: true
+        command: ["bash", Qt.resolvedUrl("fetch_sysinfo.sh").toString().replace("file://", "")]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                let lines = this.text.trim().split("\n");
+                for (let i = 0; i < lines.length; i++) {
+                    let line = lines[i];
+                    let idx = line.indexOf(":");
+                    if (idx < 0) continue;
+                    let key = line.substring(0, idx).trim();
+                    let val = line.substring(idx + 1).trim();
+                    if      (key === "OS")         window.sysOs = val;
+                    else if (key === "KERNEL")     window.sysKernel = val;
+                    else if (key === "SHELL")      window.sysShell = val;
+                    else if (key === "CPU_NAME")   window.sysCpuName = val;
+                    else if (key === "GPU")        window.sysGpu = val;
+                    else if (key === "MEMORY")     window.sysMemory = val;
+                    else if (key === "DISK")       window.sysDiskStr = val;
+                    else if (key === "PACKAGES")   window.sysPackages = val;
+                    else if (key === "TERMINAL")   window.sysTerminal = val;
+                    else if (key === "WM")         window.sysWm = val;
+                    else if (key === "RESOLUTION") window.sysResolution = val;
+                    else if (key === "LOCALE")     window.sysLocale = val;
+                }
+            }
+        }
+    }
+
+    property real globalOrbitAngle: 0
+    NumberAnimation on globalOrbitAngle {
+        from: 0; to: Math.PI * 2; duration: 90000; loops: Animation.Infinite; running: window.visible
+    }
+
+    // --- ENHANCED STARTUP ANIMATION STATES ---
+    property real introMain: 0
+    property real introTop: 0
+    property real introNotifs: 0
+    property real introCore: 0
+    property real introSliders: 0
+    property real introActions: 0
+    property real introProfiles: 0
+
+    ParallelAnimation {
+        running: true
+
+        // Base window fades, scales, and lifts
+        NumberAnimation { target: window; property: "introMain"; from: 0; to: 1.0; duration: 800; easing.type: Easing.OutQuart }
+
+        // Top bar drops in
+        SequentialAnimation {
+            PauseAnimation { duration: 100 }
+            NumberAnimation { target: window; property: "introTop"; from: 0; to: 1.0; duration: 800; easing.type: Easing.OutBack; easing.overshoot: 1.0 }
+        }
+
+        // Notification List cascades in smoothly
+        SequentialAnimation {
+            PauseAnimation { duration: 150 }
+            NumberAnimation { target: window; property: "introNotifs"; from: 0; to: 1.0; duration: 850; easing.type: Easing.OutQuart }
+        }
+
+        // Central core pops out and breathes
+        SequentialAnimation {
+            PauseAnimation { duration: 250 }
+            NumberAnimation { target: window; property: "introCore"; from: 0; to: 1.0; duration: 900; easing.type: Easing.OutBack; easing.overshoot: 1.2 }
+        }
+
+        // Hardware sliders slide up
+        SequentialAnimation {
+            PauseAnimation { duration: 350 }
+            NumberAnimation { target: window; property: "introSliders"; from: 0; to: 1.0; duration: 800; easing.type: Easing.OutQuart }
+        }
+
+        // Actions waterfall
+        SequentialAnimation {
+            PauseAnimation { duration: 450 }
+            NumberAnimation { target: window; property: "introActions"; from: 0; to: 1.0; duration: 800; easing.type: Easing.OutExpo }
+        }
+
+        // Power profiles finish the wave
+        SequentialAnimation {
+            PauseAnimation { duration: 550 }
+            NumberAnimation { target: window; property: "introProfiles"; from: 0; to: 1.0; duration: 850; easing.type: Easing.OutBack; easing.overshoot: 0.8 }
+        }
+    }
+
+    ParallelAnimation {
+        id: exitAnim
+        NumberAnimation { target: window; property: "introMain"; to: 0; duration: 400; easing.type: Easing.InQuart }
+        NumberAnimation { target: window; property: "introTop"; to: 0; duration: 300; easing.type: Easing.InQuart }
+        NumberAnimation { target: window; property: "introNotifs"; to: 0; duration: 300; easing.type: Easing.InQuart }
+        NumberAnimation { target: window; property: "introCore"; to: 0; duration: 350; easing.type: Easing.InQuart }
+        NumberAnimation { target: window; property: "introSliders"; to: 0; duration: 250; easing.type: Easing.InQuart }
+        NumberAnimation { target: window; property: "introActions"; to: 0; duration: 200; easing.type: Easing.InQuart }
+        NumberAnimation { target: window; property: "introProfiles"; to: 0; duration: 150; easing.type: Easing.InQuart }
+    }
+
+    // -------------------------------------------------------------------------
+    // UI LAYOUT
+    // -------------------------------------------------------------------------
+    Item {
+        anchors.fill: parent
+        scale: 0.92 + (0.08 * introMain)
+        opacity: introMain
+        transform: Translate { y: window.s(15) * (1 - introMain) }
+
+        // Unified Outer Background
+        Rectangle {
+            anchors.fill: parent
+            radius: window.s(20)
+            color: window.base
+            border.color: window.surface0 
+            border.width: 1
+            clip: true
+
+            // Rotating Background Blobs - Spanning across the whole widget natively
+            Rectangle {
+                width: parent.width * 0.8; height: width; radius: width / 2
+                x: (parent.width / 2 - width / 2) + Math.cos(window.globalOrbitAngle * 2) * window.s(150)
+                y: (parent.height / 2 - height / 2) + Math.sin(window.globalOrbitAngle * 2) * window.s(100)
+                opacity: 0.08
+                color: window.ambientPrimary
+                Behavior on color { ColorAnimation { duration: 1000 } }
+            }
+            
+            Rectangle {
+                width: parent.width * 0.9; height: width; radius: width / 2
+                x: (parent.width / 2 - width / 2) + Math.sin(window.globalOrbitAngle * 1.5) * window.s(-150)
+                y: (parent.height / 2 - height / 2) + Math.cos(window.globalOrbitAngle * 1.5) * window.s(-100)
+                opacity: 0.06
+                color: window.ambientSecondary
+                Behavior on color { ColorAnimation { duration: 1000 } }
+            }
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: window.s(10)
+                anchors.rightMargin: window.s(4)
+                spacing: window.s(12) // Seamless separation instead of a line
+
+                // ==========================================
+                // LEFT SIDE: NOTIFICATION CENTER
+                // ==========================================
+                Item {
+                    opacity: window.maintOpen ? 0 : 1
+                    visible: opacity > 0.01
+                    Behavior on opacity { NumberAnimation { duration: 200; easing.type: Easing.InCubic } }
+                    Layout.preferredWidth: window.maintOpen ? 0 : window.s(300)
+                    Behavior on Layout.preferredWidth { NumberAnimation { duration: 240; easing.type: Easing.InOutCubic } }
+                    Layout.fillHeight: true
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: window.s(14)
+                        spacing: window.s(15)
+
+                        // --- Notification Header & DND Toggle ---
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: window.s(38)
+                            spacing: window.s(12)
+                            
+                            transform: Translate { y: window.s(-20) * (1.0 - introTop) }
+                            opacity: introTop
+
+                            Item { Layout.fillWidth: true }
+                            Text {
+                                text: "Notifications"
+                                font.family: "JetBrains Mono"
+                                font.weight: Font.Black
+                                font.pixelSize: window.s(18)
+                                color: window.text
+                            }
+                            Item { Layout.fillWidth: true }
+
+                            // DND Toggle Button
+                            Rectangle {
+                                Layout.preferredWidth: dndMa.containsMouse ? window.s(38) + dndText.implicitWidth + window.s(8) : window.s(38)
+                                Layout.preferredHeight: window.s(38)
+                                radius: window.s(12)
+                                color: window.dndEnabled ? Qt.alpha(window.red, 0.15) : (dndMa.containsMouse ? window.surface1 : "transparent")
+                                border.color: window.dndEnabled ? window.red : (dndMa.containsMouse ? window.surface2 : "transparent")
+                                border.width: 1
+                                clip: true
+
+                                Behavior on width { NumberAnimation { duration: 300; easing.type: Easing.OutQuint } }
+                                Behavior on color { ColorAnimation { duration: 150 } }
+                                Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                                Row {
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: window.s(10)
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: window.s(8)
+
+                                    Text {
+                                        id: dndText
+                                        text: window.dndEnabled ? "Silent" : "Mute"
+                                        font.family: "JetBrains Mono"
+                                        font.weight: Font.Bold
+                                        font.pixelSize: window.s(13)
+                                        color: window.dndEnabled ? window.red : window.text
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        opacity: dndMa.containsMouse ? 1.0 : 0.0
+                                        Behavior on opacity { NumberAnimation { duration: 250 } }
+                                    }
+
+                                    Text {
+                                        font.family: "Iosevka Nerd Font"
+                                        font.pixelSize: window.s(18)
+                                        color: window.dndEnabled ? window.red : (dndMa.containsMouse ? window.text : window.overlay0)
+                                        text: window.dndEnabled ? "󰂛" : "󰂚"
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        Behavior on color { ColorAnimation { duration: 150 } }
+                                    }
+                                }
+
+                                MouseArea {
+                                    id: dndMa
+                                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        window.dndEnabled = !window.dndEnabled;
+                                        Quickshell.execDetached(["sh", "-c", "mkdir -p ~/.cache && echo '" + (window.dndEnabled ? "1" : "0") + "' > ~/.cache/qs_dnd"]);
+                                    }
+                                }
+                            }
+                        }
+
+                        // --- Zero State ---
+                        Text {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                            font.family: "JetBrains Mono"
+                            font.weight: Font.Medium
+                            font.pixelSize: window.s(14)
+                            color: window.overlay0
+                            text: "You're all caught up."
+                            visible: !notifModel || notifModel.count === 0
+                            opacity: introNotifs
+                        }
+
+                        // --- Notification List ---
+                        ListView {
+                            id: notifList
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            model: window.notifModel
+                            spacing: window.s(8)
+                            clip: true
+                            
+                            opacity: introNotifs
+                            transform: Translate { y: window.s(20) * (1 - introNotifs) }
+
+                            ScrollBar.vertical: ScrollBar {
+                                active: notifList.moving || notifList.movingVertically
+                                width: window.s(4)
+                                policy: ScrollBar.AsNeeded
+                                contentItem: Rectangle { implicitWidth: window.s(4); radius: window.s(2); color: window.surface2 }
+                            }
+
+                            // Fluid Animations
+                            add: Transition {
+                                ParallelAnimation {
+                                    NumberAnimation { property: "opacity"; from: 0.0; to: 1.0; duration: 400; easing.type: Easing.OutQuint }
+                                    NumberAnimation { property: "x"; from: window.s(-40); to: 0; duration: 500; easing.type: Easing.OutExpo }
+                                    NumberAnimation { property: "scale"; from: 0.95; to: 1.0; duration: 500; easing.type: Easing.OutBack }
+                                }
+                            }
+                            remove: Transition {
+                                ParallelAnimation {
+                                    NumberAnimation { property: "opacity"; to: 0.0; duration: 300; easing.type: Easing.OutQuint }
+                                    NumberAnimation { property: "scale"; to: 0.9; duration: 300; easing.type: Easing.OutQuint }
+                                }
+                            }
+                            displaced: Transition {
+                                NumberAnimation { properties: "y"; duration: 400; easing.type: Easing.OutExpo }
+                            }
+
+                            // --- Grouping Configuration ---
+                            section.property: "appName"
+                            section.criteria: ViewSection.FullString
+                            section.delegate: Item {
+                                width: ListView.view.width
+                                height: window.s(46)
+                                
+                                Rectangle {
+                                    anchors.fill: parent
+                                    anchors.topMargin: window.s(10)
+                                    anchors.bottomMargin: window.s(4)
+                                    color: headerMa.containsMouse ? window.surface1 : "transparent"
+                                    radius: window.s(8)
+                                    Behavior on color { ColorAnimation { duration: 150 } }
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: window.s(6)
+                                        anchors.rightMargin: window.s(6)
+                                        spacing: window.s(8)
+
+                                        // Clickable Area for Collapse Toggle
+                                        MouseArea {
+                                            id: headerMa
+                                            Layout.fillWidth: true
+                                            Layout.fillHeight: true
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: window.toggleGroup(section)
+
+                                            RowLayout {
+                                                anchors.fill: parent
+                                                spacing: window.s(8)
+                                                
+                                                Text {
+                                                    font.family: "Iosevka Nerd Font"
+                                                    font.pixelSize: window.s(14)
+                                                    color: window.mauve
+                                                    text: window.isCollapsed(section) ? "󰅂" : "󰅀"
+                                                    Behavior on rotation { NumberAnimation { duration: 250; easing.type: Easing.OutBack } }
+                                                }
+
+                                                Text {
+                                                    text: section.toUpperCase()
+                                                    font.family: "JetBrains Mono"
+                                                    font.weight: Font.Black
+                                                    font.pixelSize: window.s(11)
+                                                    color: window.text
+                                                    Layout.fillWidth: true
+                                                    verticalAlignment: Text.AlignVCenter
+                                                }
+                                            }
+                                        }
+
+                                        // Clear Group Button
+                                        Rectangle {
+                                            Layout.preferredWidth: window.s(26)
+                                            Layout.preferredHeight: window.s(26)
+                                            radius: window.s(13)
+                                            color: groupClearMa.containsMouse ? window.surface2 : "transparent"
+                                            Behavior on color { ColorAnimation { duration: 150 } }
+
+                                            Text {
+                                                anchors.centerIn: parent
+                                                font.family: "Iosevka Nerd Font"
+                                                font.pixelSize: window.s(14)
+                                                color: groupClearMa.containsMouse ? window.red : window.overlay0
+                                                text: "󰅖"
+                                                Behavior on color { ColorAnimation { duration: 150 } }
+                                            }
+
+                                            MouseArea {
+                                                id: groupClearMa
+                                                anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                onClicked: window.clearGroup(section)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // --- Individual Notification Card ---
+                            delegate: Item {
+                                id: delegateWrapper
+                                width: ListView.view.width
+                                property bool isHidden: window.isCollapsed(model.appName)
+                                height: isHidden ? 0 : innerCard.height
+                                visible: height > 0
+                                opacity: isHidden ? 0 : 1
+                                clip: true
+                                
+                                Behavior on height { NumberAnimation { duration: 300; easing.type: Easing.OutExpo } }
+                                Behavior on opacity { NumberAnimation { duration: 250; easing.type: Easing.OutQuint } }
+
+                                Rectangle {
+                                    id: innerCard
+                                    width: parent.width
+                                    height: cardContent.height + window.s(24)
+                                    radius: window.s(14)
+                                    color: cardHover.containsMouse ? window.surface1 : window.surface0
+                                    border.color: cardHover.containsMouse ? window.surface2 : "transparent"
+                                    border.width: 1
+                                    clip: true
+                                    Behavior on color { ColorAnimation { duration: 200 } }
+                                    Behavior on border.color { ColorAnimation { duration: 200 } }
+
+                                    MouseArea {
+                                        id: cardHover
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                    }
+
+                                    // Left side accent stripe
+                                    Rectangle {
+                                        width: window.s(4)
+                                        height: parent.height
+                                        anchors.left: parent.left
+                                        color: window.ambientPrimary
+                                    }
+
+                                    ColumnLayout {
+                                        id: cardContent
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.top: parent.top
+                                        anchors.margins: window.s(14)
+                                        anchors.leftMargin: window.s(18) // make room for the accent stripe
+                                        spacing: window.s(6)
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: window.s(8)
+
+                                            Text {
+                                                text: model.summary || "Notification"
+                                                font.family: "JetBrains Mono"
+                                                font.weight: Font.Bold
+                                                font.pixelSize: window.s(13)
+                                                color: window.text
+                                                Layout.fillWidth: true
+                                                wrapMode: Text.Wrap
+                                            }
+
+                                            // Individual Dismiss Button
+                                            Rectangle {
+                                                Layout.preferredWidth: window.s(22)
+                                                Layout.preferredHeight: window.s(22)
+                                                radius: window.s(11)
+                                                color: itemClearMa.containsMouse ? Qt.alpha(window.red, 0.15) : "transparent"
+                                                Behavior on color { ColorAnimation { duration: 150 } }
+
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    font.family: "Iosevka Nerd Font"
+                                                    font.pixelSize: window.s(12)
+                                                    color: itemClearMa.containsMouse ? window.red : window.overlay0
+                                                    text: "󰅖"
+                                                    Behavior on color { ColorAnimation { duration: 150 } }
+                                                }
+
+                                                MouseArea {
+                                                    id: itemClearMa
+                                                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                    onClicked: {
+                                                        if(window.notifModel) window.notifModel.remove(index);
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        Text {
+                                            text: model.body || ""
+                                            font.family: "JetBrains Mono"
+                                            font.weight: Font.Medium
+                                            font.pixelSize: window.s(11)
+                                            color: window.subtext0
+                                            Layout.fillWidth: true
+                                            wrapMode: Text.Wrap
+                                            visible: text !== ""
+                                            textFormat: Text.PlainText 
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ==========================================
+                // RIGHT SIDE: SYSTEM RESOURCES CORE
+                // ==========================================
+                Item {
+                    opacity: window.maintOpen ? 0 : 1
+                    visible: opacity > 0.01
+                    Behavior on opacity { NumberAnimation { duration: 200; easing.type: Easing.InCubic } }
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+
+                    // Radar Rings
+                    Item {
+                        id: radarItem
+                        anchors.fill: parent
+                        
+                        Repeater {
+                            model: 3
+                            Rectangle {
+                                anchors.centerIn: parent
+                                anchors.verticalCenterOffset: window.s(-70)
+                                width: window.s(320) + (index * window.s(170))
+                                height: width
+                                radius: width / 2
+                                color: "transparent"
+                                border.color: window.ambientSecondary
+                                border.width: 1
+                                opacity: 0.06 - (index * 0.02)
+                            }
+                        }
+                    }
+
+                    // ==========================================
+                    // TOP: UPTIME COMPONENT
+                    // ==========================================
+                    // Expanding top-left screenshot icon
+                    Rectangle {
+                        id: screenshotBtn
+                        anchors.top: parent.top; anchors.left: parent.left
+                        anchors.margins: window.s(20)
+                        z: 10
+                        width: screenshotMa.containsMouse ? window.s(38) + screenshotLabel.implicitWidth + window.s(12) : window.s(38)
+                        height: window.s(38); radius: window.s(12)
+                        color: screenshotMa.containsMouse ? window.surface1 : "transparent"
+                        border.color: screenshotMa.containsMouse ? window.surface2 : "transparent"
+                        clip: true
+
+                        transform: Translate { y: window.s(-20) * (1.0 - introTop) }
+                        opacity: introTop
+
+                        Behavior on width { NumberAnimation { duration: 300; easing.type: Easing.OutQuint } }
+                        Behavior on color { ColorAnimation { duration: 150 } }
+                        Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                        Row {
+                            anchors.left: parent.left
+                            anchors.leftMargin: window.s(13)
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: window.s(12)
+
+                            Text {
+                                font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(18)
+                                color: screenshotMa.containsMouse ? window.blue : window.overlay0
+                                text: "󰄀"
+                                anchors.verticalCenter: parent.verticalCenter
+                                Behavior on color { ColorAnimation { duration: 150 } }
+                            }
+
+                            Text {
+                                id: screenshotLabel
+                                text: "Screenshot"
+                                font.family: "JetBrains Mono"
+                                font.weight: Font.Bold
+                                font.pixelSize: window.s(14)
+                                color: window.text
+                                anchors.verticalCenter: parent.verticalCenter
+                                opacity: screenshotMa.containsMouse ? 1.0 : 0.0
+                                Behavior on opacity { NumberAnimation { duration: 250 } }
+                            }
+                        }
+
+                        MouseArea {
+                            id: screenshotMa
+                            anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                // Close popup immediately (no animation), then screenshot
+                                Quickshell.execDetached(["sh", "-c", "echo 'close' > /tmp/qs_widget_state"]);
+                                screenshotSelectDelay.start();
+                            }
+                        }
+
+                        Timer {
+                            id: screenshotSelectDelay; interval: 800; repeat: false
+                            onTriggered: Quickshell.execDetached(["bash", "-c", "~/.config/hypr/scripts/screenshot.sh"])
+                        }
+                    }
+
+                    // (the "update" action now lives on the uptime gauge's header line)
+
+                    // Expanding top-right logout icon
+                    Rectangle {
+                        id: logoutBtn
+                        anchors.top: parent.top; anchors.right: parent.right
+                        anchors.margins: window.s(20)
+                        z: 10
+                        width: logoutMa.containsMouse ? window.s(38) + usernameText.implicitWidth + window.s(12) : window.s(38)
+                        height: window.s(38); radius: window.s(12)
+                        color: logoutMa.containsMouse ? window.surface1 : "transparent"
+                        border.color: logoutMa.containsMouse ? window.surface2 : "transparent"
+                        clip: true
+                        
+                        transform: Translate { y: window.s(-20) * (1.0 - introTop) }
+                        opacity: introTop
+
+                        Behavior on width { NumberAnimation { duration: 300; easing.type: Easing.OutQuint } }
+                        Behavior on color { ColorAnimation { duration: 150 } }
+                        Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                        Row {
+                            anchors.right: parent.right
+                            anchors.rightMargin: window.s(13)
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: window.s(12)
+
+                            Text {
+                                id: usernameText
+                                text: window.currentUserName
+                                font.family: "JetBrains Mono"
+                                font.weight: Font.Bold
+                                font.pixelSize: window.s(14)
+                                color: window.text
+                                anchors.verticalCenter: parent.verticalCenter
+                                opacity: logoutMa.containsMouse ? 1.0 : 0.0
+                                Behavior on opacity { NumberAnimation { duration: 250 } }
+                            }
+
+                            Text {
+                                font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(18)
+                                color: logoutMa.containsMouse ? window.red : window.overlay0
+                                text: "󰍃"
+                                anchors.verticalCenter: parent.verticalCenter
+                                Behavior on color { ColorAnimation { duration: 150 } }
+                            }
+                        }
+
+                        MouseArea {
+                            id: logoutMa
+                            anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            onClicked: { 
+                                exitAnim.start();
+                                Quickshell.execDetached(["sh", "-c", "loginctl kill-session $XDG_SESSION_ID"]); 
+                                Quickshell.execDetached(["sh", "-c", "echo 'close' > /tmp/qs_widget_state"]); 
+                            }
+                        }
+                    }
+
+                    // ── 2-week uptime gauge — at the top, between the screenshot
+                    // (left) and logout (right) buttons. Fills as uptime → 14 days.
+                    // At the threshold it surfaces an arch-audit (real CVE check) +
+                    // update action. It never auto-upgrades or reboots on its own. ──
+                    Item {
+                        id: uptimeGauge
+                        z: 10
+                        visible: !window.maintOpen   // hidden while the update panel is up
+                        opacity: window.maintOpen ? 0 : 1
+                        Behavior on opacity { NumberAnimation { duration: 200 } }
+                        anchors.top: parent.top
+                        anchors.topMargin: window.s(20)
+                        anchors.left: screenshotBtn.right
+                        // Track the logout button's left edge so the gauge shrinks out of
+                        // the way (animated) when logout expands on hover.
+                        anchors.right: logoutBtn.left
+                        anchors.leftMargin: window.s(14)
+                        anchors.rightMargin: window.s(12)
+                        height: window.s(38)
+                        transform: Translate { y: window.s(-20) * (1.0 - introTop) }
+                        opacity: introTop
+                        property int twoWeeks: 14 * 24 * 3600
+                        property real frac: Math.min(1, window.uptimeSec / twoWeeks)
+                        property int daysLeft: Math.max(0, Math.ceil((twoWeeks - window.uptimeSec) / 86400))
+                        property bool due: window.uptimeSec >= twoWeeks
+
+                        Column {
+                            anchors.fill: parent; spacing: window.s(3)
+                            RowLayout {
+                                width: parent.width; spacing: window.s(8)
+                                Text { text: uptimeGauge.due ? "Uptime 2wk — maintenance due" : "Uptime → 2wk maintenance"
+                                    font.family: "JetBrains Mono"; font.weight: Font.Bold; font.pixelSize: window.s(8)
+                                    color: uptimeGauge.due ? window.peach : window.subtext0 }
+                                Item { Layout.fillWidth: true }
+                                Text { text: uptimeGauge.due ? "now" : uptimeGauge.daysLeft + "d left"
+                                    font.family: "JetBrains Mono"; font.pixelSize: window.s(8); color: window.overlay1 }
+                                Text { text: "·"; font.family: "JetBrains Mono"; font.pixelSize: window.s(8); color: window.overlay0 }
+                                // "update" — same line as the uptime text; opens the maintenance panel.
+                                Text {
+                                    id: updateText
+                                    text: "update"
+                                    font.family: "JetBrains Mono"; font.weight: Font.Bold; font.pixelSize: window.s(8)
+                                    color: updateMa.containsMouse ? window.mauve : window.peach
+                                    Behavior on color { ColorAnimation { duration: 150 } }
+                                    MouseArea { id: updateMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: window.maintCheck() }
+                                }
+                            }
+                            // The bar — a single solid track now that it's at the top
+                            // (no longer interrupted by the center network circle).
+                            Rectangle {
+                                width: parent.width; height: window.s(8); radius: window.s(4)
+                                color: window.surface0; border.color: window.surface1; border.width: 1
+                                Rectangle {
+                                    x: 1; y: 1; height: parent.height - 2; radius: parent.radius
+                                    width: Math.max(0, (parent.width - 2) * uptimeGauge.frac)
+                                    color: uptimeGauge.due ? window.peach : window.ambientPrimary
+                                    Behavior on width { NumberAnimation { duration: 800; easing.type: Easing.OutQuint } }
+                                    Behavior on color { ColorAnimation { duration: 600 } }
+                                }
+                            }
+                            // Action row — only at threshold. Run arch-audit (real
+                            // CVE scan) and, separately, let the user update.
+                            RowLayout {
+                                width: parent.width; spacing: window.s(6)
+                                visible: uptimeGauge.due
+                                Rectangle { Layout.preferredWidth: auditRow.implicitWidth + window.s(14); Layout.preferredHeight: window.s(20); radius: window.s(6)
+                                    color: auditMa.containsMouse ? Qt.rgba(window.yellow.r, window.yellow.g, window.yellow.b, 0.2) : window.surface0
+                                    border.color: window.surface1; border.width: 1
+                                    Row { id: auditRow; anchors.centerIn: parent; spacing: window.s(4)
+                                        Text { text: window.auditRunning ? "󰦖" : "󰒃"; font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(10); color: window.yellow; anchors.verticalCenter: parent.verticalCenter
+                                            RotationAnimation on rotation { running: window.auditRunning; loops: Animation.Infinite; from: 0; to: 360; duration: 1000 } }
+                                        Text { text: "Scan (arch-audit)"; font.family: "JetBrains Mono"; font.pixelSize: window.s(8); color: window.text; anchors.verticalCenter: parent.verticalCenter } }
+                                    MouseArea { id: auditMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: window.runArchAudit() }
+                                }
+                                Rectangle { Layout.preferredWidth: updRow.implicitWidth + window.s(14); Layout.preferredHeight: window.s(20); radius: window.s(6)
+                                    color: updMa.containsMouse ? Qt.rgba(window.green.r, window.green.g, window.green.b, 0.2) : window.surface0
+                                    border.color: window.surface1; border.width: 1
+                                    Row { id: updRow; anchors.centerIn: parent; spacing: window.s(4)
+                                        Text { text: "󰚰"; font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(10); color: window.green; anchors.verticalCenter: parent.verticalCenter }
+                                        Text { text: "Update now"; font.family: "JetBrains Mono"; font.pixelSize: window.s(8); color: window.text; anchors.verticalCenter: parent.verticalCenter } }
+                                    MouseArea { id: updMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: window.maintRun("update") }
+                                }
+                            }
+                            // Audit result line
+                            Text { width: parent.width; visible: window.auditResult !== ""
+                                text: window.auditResult
+                                font.family: "JetBrains Mono"; font.pixelSize: window.s(8)
+                                color: window.auditResult.indexOf("No ") === 0 ? window.green : window.peach
+                                wrapMode: Text.Wrap }
+                        }
+                    }
+
+                    // ==========================================
+                    // BIG SYSTEM RESOURCES GRID (DESKTOP)
+                    // ==========================================
+                    Grid {
+                        id: sysGrid
+                        columns: 2
+                        spacing: window.s(25)
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        // Centre vertically in the band between the header (uptime bar)
+                        // and the fastfetch card, so it doesn't overlap either.
+                        y: uptimeGauge.y + uptimeGauge.height + ((bottomDocks.y - (uptimeGauge.y + uptimeGauge.height)) - height) / 2
+                        anchors.horizontalCenterOffset: window.s(6)
+                        z: 1
+
+                        opacity: introCore
+                        transform: Translate { y: window.s(25) * (1 - introCore) }
+                        scale: 0.9 + (0.1 * introCore)
+
+                        // 1. CPU Orb
+                        Item {
+                            id: cpuOrb; width: window.s(165); height: window.s(165)
+                            property real animVal: window.cpuUsage
+                            Behavior on animVal { NumberAnimation { duration: 1200; easing.type: Easing.OutQuint } }
+                            onAnimValChanged: cpuCanvas.requestPaint()
+                            
+                            scale: cpuMa.containsMouse ? 1.05 : 1.0
+                            Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutExpo } }
+
+                            // Individual Aura - Fixed Overlap
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: parent.width + (cpuMa.containsMouse ? window.s(16) : window.s(4)) 
+                                height: width; radius: width / 2
+                                color: window.blue
+                                opacity: cpuMa.containsMouse ? 0.25 : 0.08
+                                Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutExpo } }
+                                Behavior on opacity { NumberAnimation { duration: 300 } }
+                            }
+
+                            Canvas {
+                                id: cpuCanvas; anchors.fill: parent; rotation: 180
+                                onPaint: {
+                                    var ctx = getContext("2d"); ctx.clearRect(0, 0, width, height);
+                                    var cX = width/2; var cY = height/2; var rad = (width/2)-window.s(8);
+                                    var eA = (Math.min(100, Math.max(0, parent.animVal)) / 100) * 2 * Math.PI;
+                                    ctx.lineCap = "round"; ctx.lineWidth = window.s(8); ctx.beginPath(); ctx.arc(cX, cY, rad, 0, 2*Math.PI); 
+                                    ctx.strokeStyle = window.surface0.toString(); ctx.stroke();
+                                    var grad = ctx.createLinearGradient(0, height, width, 0); grad.addColorStop(0, window.blue.toString()); grad.addColorStop(1, window.sapphire.toString());
+                                    ctx.lineWidth = window.s(14); ctx.beginPath(); ctx.arc(cX, cY, rad, 0, eA); ctx.strokeStyle = grad; ctx.stroke();
+                                }
+                            }
+                            ColumnLayout {
+                                anchors.centerIn: parent; spacing: 0
+                                RowLayout {
+                                    Layout.alignment: Qt.AlignHCenter; spacing: window.s(4)
+                                    Text { font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(18); color: window.blue; text: "" }
+                                    Text { font.family: "JetBrains Mono"; font.weight: Font.Black; font.pixelSize: window.s(28); color: window.text; text: Math.round(cpuOrb.animVal) + "%" }
+                                }
+                                Text { Layout.alignment: Qt.AlignHCenter; font.family: "JetBrains Mono"; font.weight: Font.Bold; font.pixelSize: window.s(12); color: window.subtext0; text: "CPU LOAD" }
+                            }
+                            MouseArea { id: cpuMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor }
+                        }
+
+                        // 2. RAM Orb
+                        Item {
+                            id: ramOrb; width: window.s(165); height: window.s(165)
+                            property real animVal: window.ramUsage
+                            Behavior on animVal { NumberAnimation { duration: 1200; easing.type: Easing.OutQuint } }
+                            onAnimValChanged: ramCanvas.requestPaint()
+
+                            scale: ramMa.containsMouse ? 1.05 : 1.0
+                            Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutExpo } }
+
+                            // Individual Aura - Fixed Overlap
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: parent.width + (ramMa.containsMouse ? window.s(16) : window.s(4))
+                                height: width; radius: width / 2
+                                color: window.mauve
+                                opacity: ramMa.containsMouse ? 0.25 : 0.08
+                                Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutExpo } }
+                                Behavior on opacity { NumberAnimation { duration: 300 } }
+                            }
+
+                            Canvas {
+                                id: ramCanvas; anchors.fill: parent; rotation: 180
+                                onPaint: {
+                                    var ctx = getContext("2d"); ctx.clearRect(0, 0, width, height);
+                                    var cX = width/2; var cY = height/2; var rad = (width/2)-window.s(8);
+                                    var eA = (Math.min(100, Math.max(0, parent.animVal)) / 100) * 2 * Math.PI;
+                                    ctx.lineCap = "round"; ctx.lineWidth = window.s(8); ctx.beginPath(); ctx.arc(cX, cY, rad, 0, 2*Math.PI); 
+                                    ctx.strokeStyle = window.surface0.toString(); ctx.stroke();
+                                    var grad = ctx.createLinearGradient(0, height, width, 0); grad.addColorStop(0, window.mauve.toString()); grad.addColorStop(1, window.pink.toString());
+                                    ctx.lineWidth = window.s(14); ctx.beginPath(); ctx.arc(cX, cY, rad, 0, eA); ctx.strokeStyle = grad; ctx.stroke();
+                                }
+                            }
+                            ColumnLayout {
+                                anchors.centerIn: parent; spacing: 0
+                                RowLayout {
+                                    Layout.alignment: Qt.AlignHCenter; spacing: window.s(4)
+                                    Text { font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(18); color: window.mauve; text: "󰍛" }
+                                    Text { font.family: "JetBrains Mono"; font.weight: Font.Black; font.pixelSize: window.s(28); color: window.text; text: Math.round(ramOrb.animVal) + "%" }
+                                }
+                                Text { Layout.alignment: Qt.AlignHCenter; font.family: "JetBrains Mono"; font.weight: Font.Bold; font.pixelSize: window.s(12); color: window.subtext0; text: "MEMORY" }
+                            }
+                            MouseArea { id: ramMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor }
+                        }
+
+                        // 3. GPU Orb
+                        Item {
+                            id: gpuOrb; width: window.s(165); height: window.s(165)
+                            property real animVal: window.gpuUsage
+                            Behavior on animVal { NumberAnimation { duration: 1200; easing.type: Easing.OutQuint } }
+                            onAnimValChanged: gpuCanvas.requestPaint()
+
+                            scale: gpuMa.containsMouse ? 1.05 : 1.0
+                            Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutExpo } }
+
+                            // Individual Aura - Fixed Overlap
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: parent.width + (gpuMa.containsMouse ? window.s(16) : window.s(4))
+                                height: width; radius: width / 2
+                                color: window.peach
+                                opacity: gpuMa.containsMouse ? 0.25 : 0.08
+                                Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutExpo } }
+                                Behavior on opacity { NumberAnimation { duration: 300 } }
+                            }
+
+                            Canvas {
+                                id: gpuCanvas; anchors.fill: parent; rotation: 180
+                                onPaint: {
+                                    var ctx = getContext("2d"); ctx.clearRect(0, 0, width, height);
+                                    var cX = width/2; var cY = height/2; var rad = (width/2)-window.s(8);
+                                    var eA = (Math.min(100, Math.max(0, parent.animVal)) / 100) * 2 * Math.PI;
+                                    ctx.lineCap = "round"; ctx.lineWidth = window.s(8); ctx.beginPath(); ctx.arc(cX, cY, rad, 0, 2*Math.PI); 
+                                    ctx.strokeStyle = window.surface0.toString(); ctx.stroke();
+                                    var grad = ctx.createLinearGradient(0, height, width, 0); grad.addColorStop(0, window.peach.toString()); grad.addColorStop(1, window.yellow.toString());
+                                    ctx.lineWidth = window.s(14); ctx.beginPath(); ctx.arc(cX, cY, rad, 0, eA); ctx.strokeStyle = grad; ctx.stroke();
+                                }
+                            }
+                            ColumnLayout {
+                                anchors.centerIn: parent; spacing: 0
+                                RowLayout {
+                                    Layout.alignment: Qt.AlignHCenter; spacing: window.s(4)
+                                    Text { font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(18); color: window.peach; text: "󰍹" }
+                                    Text { font.family: "JetBrains Mono"; font.weight: Font.Black; font.pixelSize: window.s(28); color: window.text; text: Math.round(gpuOrb.animVal) + "%" }
+                                }
+                                Text { Layout.alignment: Qt.AlignHCenter; font.family: "JetBrains Mono"; font.weight: Font.Bold; font.pixelSize: window.s(12); color: window.subtext0; text: "GPU LOAD" }
+                            }
+                            MouseArea { id: gpuMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor }
+                        }
+
+                        // 4. GPU VRAM Orb (was system temp)
+                        Item {
+                            id: tempOrb; width: window.s(165); height: window.s(165)
+                            property real animVal: window.gpuVram
+                            Behavior on animVal { NumberAnimation { duration: 1200; easing.type: Easing.OutQuint } }
+                            onAnimValChanged: tempCanvas.requestPaint()
+
+                            scale: tempMa.containsMouse ? 1.05 : 1.0
+                            Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutExpo } }
+
+                            // Individual Aura - Fixed Overlap
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: parent.width + (tempMa.containsMouse ? window.s(16) : window.s(4))
+                                height: width; radius: width / 2
+                                color: window.teal
+                                opacity: tempMa.containsMouse ? 0.25 : 0.08
+                                Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutExpo } }
+                                Behavior on opacity { NumberAnimation { duration: 300 } }
+                            }
+
+                            Canvas {
+                                id: tempCanvas; anchors.fill: parent; rotation: 180
+                                onPaint: {
+                                    var ctx = getContext("2d"); ctx.clearRect(0, 0, width, height);
+                                    var cX = width/2; var cY = height/2; var rad = (width/2)-window.s(8);
+                                    var eA = (Math.min(100, Math.max(0, parent.animVal)) / 100) * 2 * Math.PI;
+                                    ctx.lineCap = "round"; ctx.lineWidth = window.s(8); ctx.beginPath(); ctx.arc(cX, cY, rad, 0, 2*Math.PI); 
+                                    ctx.strokeStyle = window.surface0.toString(); ctx.stroke();
+                                    var grad = ctx.createLinearGradient(0, height, width, 0); grad.addColorStop(0, window.teal.toString()); grad.addColorStop(1, window.sapphire.toString());
+                                    ctx.lineWidth = window.s(14); ctx.beginPath(); ctx.arc(cX, cY, rad, 0, eA); ctx.strokeStyle = grad; ctx.stroke();
+                                }
+                            }
+                            ColumnLayout {
+                                anchors.centerIn: parent; spacing: 0
+                                RowLayout {
+                                    Layout.alignment: Qt.AlignHCenter; spacing: window.s(4)
+                                    Text { font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(18); color: window.teal; text: "" }
+                                    Text { font.family: "JetBrains Mono"; font.weight: Font.Black; font.pixelSize: window.s(28); color: window.text; text: Math.round(tempOrb.animVal) + "%" }
+                                }
+                                Text { Layout.alignment: Qt.AlignHCenter; font.family: "JetBrains Mono"; font.weight: Font.Bold; font.pixelSize: window.s(12); color: window.subtext0; text: "GPU VRAM" }
+                            }
+                            MouseArea { id: tempMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor }
+                        }
+                    }
+
+                    // ── Temp gauges overlay ──
+                    // A single Canvas laid OVER sysGrid (not inside the Grid, so it can
+                    // draw across cells). Each temp stack sits in the LENS between a
+                    // row's two orbs:
+                    //   CPU  → between CPU LOAD (left) and MEMORY (right), top row
+                    //   GPU  → between GPU LOAD (left) and GPU VRAM (right), bottom row
+                    // The arc is symmetric about the gap midline and complementary to
+                    // both orbs (concentric with each orb's facing edge). Segments
+                    // appear by temp (30→90) and retract when either neighbour is
+                    // hovered. Grid is 315×315; orb centres at x=72.5 (left)/242.5
+                    // (right), rows at y=72.5 (top)/242.5 (bottom).
+                    Canvas {
+                        id: tempOverlay
+                        anchors.fill: sysGrid
+                        z: 5
+                        opacity: introCore
+                        property int cpuT: window.cpuTemp
+                        property int gpuT: window.gpuTemp
+                        // Either neighbour of a row hovering causes that row's stack to
+                        // retract (cpu row = CPU LOAD + MEMORY; gpu row = GPU LOAD + VRAM).
+                        property bool cpuHov: cpuMa.containsMouse || ramMa.containsMouse
+                        property bool gpuHov: gpuMa.containsMouse || tempMa.containsMouse
+                        onCpuTChanged: requestPaint()
+                        onGpuTChanged: requestPaint()
+                        onCpuHovChanged: requestPaint()
+                        onGpuHovChanged: requestPaint()
+                        onWidthChanged: requestPaint()
+                        onHeightChanged: requestPaint()
+                        Component.onCompleted: requestPaint()
+
+                        // Draw a symmetric lens stack in the gap between two orbs whose
+                        // centres are (lx,cy) and (rx,cy). Bars are arcs concentric with
+                        // the LEFT orb, mirrored to stay symmetric in the almond gap, and
+                        // Draw a SEGMENTED stack in the lens between two orbs. The gap
+                        // centre is midX; segments are distinct short curved ticks that
+                        // stack outward (up and down) from the centre — segment 0 (30°)
+                        // is a small dot at the middle, each higher step a wider tick
+                        // placed further out, so they read as separate bars, not a blob.
+                        function drawLensStack(ctx, lx, rx, cy, temp, hov, hotColdSwap) {
+                            var steps = 13;                       // 30,35,...,90
+                            var midX = (lx + rx) / 2;             // gap centre
+                            // Vertical room for the stack in ONE direction (shrinks a
+                            // little on hover so it pulls in as the orbs expand).
+                            var spanH = hov ? window.s(50) : window.s(58);
+                            var spacing = spanH / steps;       // 13 ticks spread over the span
+                            // Max tick half-width — bounded by the gap so ticks never
+                            // touch the orb rings.
+                            var orbEdge = hov ? window.s(90) : window.s(86);
+                            var gapHalf = (rx - lx) / 2 - orbEdge;
+                            if (gapHalf < window.s(4)) gapHalf = window.s(4);
+                            // Stack direction: top row (CPU) grows UP (-1), bottom row
+                            // (GPU) grows DOWN (+1) — i.e. outward from the centre.
+                            var outDir = hotColdSwap ? 1 : -1;
+                            ctx.lineCap = "round";
+                            for (var i = 0; i < steps; i++) {
+                                var threshold = 30 + i * 5;
+                                if (temp < threshold) continue;
+                                var t = i / (steps - 1);
+                                // Stack in ONE direction only (outward, away from the
+                                // central network circle): `outDir` is -1 for the top
+                                // row (stack upward) and +1 for the bottom row (downward).
+                                // Start one spacing out from centre so the first tick
+                                // begins where the second used to sit.
+                                var yPos = cy + outDir * (i + 1) * spacing;
+                                // Tick half-width grows with temperature; capped to gap.
+                                // i=0 (30°) is a tiny dot; width ramps up from there.
+                                var hw = Math.min(gapHalf, window.s(2 + t * 17));
+                                var col = t > 0.75 ? window.red
+                                        : t > 0.5 ? window.peach
+                                        : t > 0.28 ? window.yellow
+                                        : (hotColdSwap ? window.sapphire : window.teal);
+                                ctx.lineWidth = window.s(2.5 + t * 3.5);
+                                ctx.strokeStyle = col.toString();
+                                // A short curved tick: bows vertically a touch so the
+                                // stack as a whole follows the lens curvature.
+                                var bow = (yPos - cy) * 0.12;          // subtle lens bow
+                                ctx.beginPath();
+                                ctx.moveTo(midX - hw, yPos);
+                                ctx.quadraticCurveTo(midX, yPos + bow, midX + hw, yPos);
+                                ctx.stroke();
+                            }
+                        }
+                        onPaint: {
+                            var ctx = getContext("2d"); ctx.clearRect(0, 0, width, height);
+                            var lx = window.s(82.5);              // left column orb centre x
+                            var rx = window.s(272.5);             // right column orb centre x
+                            var topY = window.s(82.5);            // top row centre y
+                            var botY = window.s(272.5);           // bottom row centre y
+                            drawLensStack(ctx, lx, rx, topY, tempOverlay.cpuT, tempOverlay.cpuHov, false);
+                            drawLensStack(ctx, lx, rx, botY, tempOverlay.gpuT, tempOverlay.gpuHov, true);
+                        }
+                    }
+
+                    // ── Side stacks ───────────────────────────────────────────
+                    // Same visual style as the temperature lens stacks, but placed
+                    // in the VERTICAL gap of each column and split down the middle
+                    // into two halves (top metric grows up, bottom metric grows down):
+                    //   Left column  : top = CPU fan,        bottom = GPU fan
+                    //   Right column : top = system storage, bottom = NAS storage
+                    Canvas {
+                        id: sideArcs
+                        anchors.fill: sysGrid
+                        z: 4
+                        opacity: introCore
+                        property int cpuFan: window.cpuFanPct
+                        property int gpuFan: window.gpuFanPct
+                        property int sysSt:  window.sysStoragePct
+                        property int nasSt:  window.nasStoragePct
+                        property bool leftHov: cpuMa.containsMouse || gpuMa.containsMouse
+                        property bool rightHov: ramMa.containsMouse || tempMa.containsMouse
+                        onCpuFanChanged: requestPaint()
+                        onGpuFanChanged: requestPaint()
+                        onSysStChanged: requestPaint()
+                        onNasStChanged: requestPaint()
+                        onLeftHovChanged: requestPaint()
+                        onRightHovChanged: requestPaint()
+                        onWidthChanged: requestPaint()
+                        onHeightChanged: requestPaint()
+                        Component.onCompleted: requestPaint()
+
+                        // One HALF of a vertical stack, in the same tick style as the
+                        // temp lens. cx = column centre x; cyGap = vertical gap centre;
+                        // tY/bY = the two orb centres (top, bottom) bounding the gap.
+                        // pct (0–100) fills segments; outDir -1 = grow up, +1 = down.
+                        // colCool/colWarm pick the low→high colour ramp.
+                        function drawSideHalf(ctx, cx, cyGap, tY, bY, pct, outDir, hov, colCool) {
+                            var steps = 13;
+                            // Vertical room from the gap centre to the nearer orb edge.
+                            var orbEdge = hov ? window.s(90) : window.s(86);
+                            var halfGap = (bY - tY) / 2 - orbEdge;
+                            if (halfGap < window.s(4)) halfGap = window.s(4);
+                            var spanV = hov ? window.s(50) : window.s(58);
+                            // Don't exceed the available half-gap.
+                            if (spanV > halfGap * 2) spanV = halfGap * 2;
+                            var spacing = spanV / steps;
+                            var p = Math.max(0, Math.min(100, pct)) / 100;
+                            ctx.lineCap = "round";
+                            for (var i = 0; i < steps; i++) {
+                                // Fill segments proportional to pct (like temp uses
+                                // threshold; here we light the first p*steps ticks).
+                                if (i / steps >= p) continue;
+                                var t = i / (steps - 1);
+                                // The gap is vertical, so ticks are short VERTICAL bars
+                                // stacked along Y, bowing horizontally toward the column.
+                                var yPos = cyGap + outDir * (i + 1) * spacing;
+                                var hh = Math.min(halfGap, window.s(2 + t * 17)); // tick half-length
+                                var col = t > 0.75 ? window.red
+                                        : t > 0.5 ? window.peach
+                                        : t > 0.28 ? window.yellow
+                                        : colCool;
+                                ctx.lineWidth = window.s(2.5 + t * 3.5);
+                                ctx.strokeStyle = col.toString();
+                                var bow = (yPos - cyGap) * 0.12;
+                                // Vertical tick that bows horizontally toward the column.
+                                ctx.beginPath();
+                                ctx.moveTo(cx, yPos - hh);
+                                ctx.quadraticCurveTo(cx + bow, yPos, cx, yPos + hh);
+                                ctx.stroke();
+                            }
+                        }
+
+                        onPaint: {
+                            var ctx = getContext("2d"); ctx.clearRect(0, 0, width, height);
+                            var leftX  = window.s(82.5);
+                            var rightX = window.s(272.5);
+                            var tY = window.s(82.5);    // top-row orb centre
+                            var bY = window.s(272.5);   // bottom-row orb centre
+                            var gapMid = window.s(177.5);
+
+                            // LEFT column gap: top half (up) = CPU fan, bottom (down) = GPU fan.
+                            drawSideHalf(ctx, leftX, gapMid, tY, bY, sideArcs.cpuFan, -1, sideArcs.leftHov, window.sapphire);
+                            drawSideHalf(ctx, leftX, gapMid, tY, bY, sideArcs.gpuFan, +1, sideArcs.leftHov, window.teal);
+                            // RIGHT column gap: top half (up) = system storage, bottom (down) = NAS.
+                            drawSideHalf(ctx, rightX, gapMid, tY, bY, sideArcs.sysSt, -1, sideArcs.rightHov, window.sapphire);
+                            drawSideHalf(ctx, rightX, gapMid, tY, bY, sideArcs.nasSt, +1, sideArcs.rightHov, window.teal);
+                        }
+                    }
+
+                    // ── Uptime circle (network up/down) — centered on the orbs ──
+                    Rectangle {
+                        id: uptimeCircle
+                        width: window.s(52); height: window.s(52)
+                        radius: width / 2
+                        color: window.surface0
+                        border.color: window.surface1
+                        border.width: 1
+                        z: 7
+
+                        // Center on the sysGrid
+                        anchors.centerIn: sysGrid
+
+                        opacity: introCore
+                        scale: 0.5 + (0.5 * introCore)
+                        Behavior on scale { NumberAnimation { duration: 600; easing.type: Easing.OutBack } }
+
+                        // Subtle ambient glow
+                        Rectangle {
+                            anchors.fill: parent; radius: parent.radius
+                            color: window.ambientPrimary; opacity: 0.06
+                            Behavior on color { ColorAnimation { duration: 1000 } }
+                        }
+
+                        property int totalSecs: window.upHours * 3600 + window.upMins * 60
+                        property int totalMins: window.upHours * 60 + window.upMins
+
+                        // Network up/down replaces the old uptime counter.
+                        Column {
+                            anchors.centerIn: parent
+                            spacing: window.s(1)
+                            Row { anchors.horizontalCenter: parent.horizontalCenter; spacing: window.s(3)
+                                Text { text: "󰇚"; font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(11); color: window.green; anchors.verticalCenter: parent.verticalCenter }
+                                Text { text: window.netDownStr; font.family: "JetBrains Mono"; font.weight: Font.Bold; font.pixelSize: window.s(8); color: window.text; anchors.verticalCenter: parent.verticalCenter }
+                            }
+                            Row { anchors.horizontalCenter: parent.horizontalCenter; spacing: window.s(3)
+                                Text { text: "󰕒"; font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(11); color: window.blue; anchors.verticalCenter: parent.verticalCenter }
+                                Text { text: window.netUpStr; font.family: "JetBrains Mono"; font.weight: Font.Bold; font.pixelSize: window.s(8); color: window.text; anchors.verticalCenter: parent.verticalCenter }
+                            }
+                        }
+                    }
+
+                    // ==========================================
+                    ColumnLayout {
+                        id: bottomDocks
+                        anchors.bottom: parent.bottom
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.margins: window.s(20)
+                        anchors.bottomMargin: window.s(20)
+                        spacing: window.s(15)
+
+                        // 1. SYSTEM INFO
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: metricsGrid.implicitHeight + window.s(24)
+                            radius: window.s(14)
+                            color: window.surface0
+                            border.color: window.surface1
+                            border.width: 1
+
+                            opacity: introProfiles
+                            transform: Translate { y: window.s(20) * (1.0 - introProfiles) }
+
+                            GridLayout {
+                                id: metricsGrid
+                                anchors {
+                                    left: parent.left; right: parent.right; top: parent.top
+                                    margins: window.s(12)
+                                }
+                                columns: 2
+                                columnSpacing: window.s(14)
+                                rowSpacing: window.s(3)
+
+                                Repeater {
+                                    model: [
+                                        { icon: "󰒋", label: "os",      val: window.sysOs },
+                                        { icon: "󰌽",  label: "kernel",  val: window.sysKernel },
+                                        { icon: "󰏖", label: "pkgs",    val: window.sysPackages },
+                                        { icon: "󰆍",  label: "shell",   val: window.sysShell },
+                                        { icon: "󰻠", label: "cpu",     val: window.sysCpuName },
+                                        { icon: "󰍹", label: "gpu",     val: window.sysGpu },
+                                        { icon: "󰋊", label: "disk",    val: window.sysDiskStr },
+                                        { icon: "󰟜", label: "res",     val: window.sysResolution },
+                                        { icon: "󰖳", label: "wm",      val: window.sysWm },
+                                        { icon: "󰗡", label: "locale",  val: window.sysLocale }
+                                    ]
+                                    delegate: RowLayout {
+                                        spacing: window.s(6)
+                                        Layout.fillWidth: true
+                                        Text {
+                                            text: modelData.icon
+                                            font.family: "Iosevka Nerd Font"
+                                            font.pixelSize: window.s(12)
+                                            color: window.mauve
+                                        }
+                                        Text {
+                                            text: modelData.label
+                                            font.family: "JetBrains Mono"
+                                            font.pixelSize: window.s(10)
+                                            font.weight: Font.Bold
+                                            color: window.overlay1
+                                            Layout.minimumWidth: window.s(50)
+                                        }
+                                        Text {
+                                            text: modelData.val !== "" ? modelData.val : "…"
+                                            font.family: "JetBrains Mono"
+                                            font.pixelSize: window.s(10)
+                                            color: window.subtext0
+                                            Layout.fillWidth: true
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2. FOCUS MODE
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: window.s(58)
+                            radius: window.s(14)
+                            clip: true
+                            color: window.surface0
+                            border.color: window.surface1
+                            border.width: 1
+
+                            opacity: introSliders
+                            transform: Translate { y: window.s(20) * (1.0 - introSliders) }
+
+                            // State: show mode selector when default OR timer is running,
+                            // show time setter when mode just changed to gaming/study but not locked
+                            property bool showTimeSetter: window.pendingFocusMode !== "" && window.focusEndEpoch <= 0
+
+                            // ── Mode selector (gaming / default / study) ──
+                            Rectangle {
+                                id: modeSelector
+                                anchors.fill: parent
+                                anchors.margins: window.s(10)
+                                radius: window.s(8)
+                                color: window.surface1
+                                border.color: window.surface2
+                                border.width: 1
+                                visible: !parent.showTimeSetter
+                                opacity: visible ? 1 : 0
+                                Behavior on opacity { NumberAnimation { duration: 250 } }
+
+                                Rectangle {
+                                    width: (parent.width - window.s(2)) / 3
+                                    height: parent.height - window.s(2)
+                                    y: window.s(1)
+                                    radius: window.s(7)
+                                    x: {
+                                        let m = window.pendingFocusMode !== "" ? window.pendingFocusMode : window.focusMode;
+                                        if (m === "gaming") return window.s(1);
+                                        if (m === "default") return width + window.s(1);
+                                        return (width * 2) + window.s(1);
+                                    }
+                                    Behavior on x { NumberAnimation { duration: 400; easing.type: Easing.OutBack; easing.overshoot: 1.2 } }
+                                    gradient: Gradient {
+                                        orientation: Gradient.Horizontal
+                                        GradientStop {
+                                            position: 0.0
+                                            property string cm: window.pendingFocusMode !== "" ? window.pendingFocusMode : window.focusMode
+                                            color: cm === "gaming" ? window.red : (cm === "study" ? window.green : window.blue)
+                                            Behavior on color { ColorAnimation { duration: 400 } }
+                                        }
+                                        GradientStop {
+                                            position: 1.0
+                                            property string cm: window.pendingFocusMode !== "" ? window.pendingFocusMode : window.focusMode
+                                            color: cm === "gaming" ? window.peach : (cm === "study" ? window.teal : window.sapphire)
+                                            Behavior on color { ColorAnimation { duration: 400 } }
+                                        }
+                                    }
+                                }
+
+                                // Countdown + add time button when timer is active.
+                                // Centred (was right-aligned): it only shows in study/gaming,
+                                // where the default glyph is hidden below, so the countdown sits
+                                // in the middle segment where the default icon used to be.
+                                Row {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    visible: window.focusCountdown !== ""
+                                    spacing: window.s(4)
+                                    z: 5
+
+                                    Text {
+                                        text: window.focusCountdown
+                                        font.family: "JetBrains Mono"; font.weight: Font.Bold; font.pixelSize: window.s(10)
+                                        color: window.focusMode === "gaming" ? window.red
+                                             : (window.focusMode === "study" ? window.green : window.overlay1)
+                                        Behavior on color { ColorAnimation { duration: 300 } }
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+
+                                    // Add time button (study only)
+                                    Rectangle {
+                                        visible: window.focusMode === "study"
+                                        width: window.s(22); height: window.s(22)
+                                        radius: window.s(6)
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        color: addTimeMa.containsMouse ? window.surface0 : "transparent"
+                                        border.color: addTimeMa.containsMouse ? window.green : "transparent"
+                                        border.width: 1
+                                        Behavior on color { ColorAnimation { duration: 150 } }
+                                        Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "+"
+                                            font.family: "JetBrains Mono"; font.weight: Font.Black; font.pixelSize: window.s(12)
+                                            color: addTimeMa.containsMouse ? window.green : window.subtext0
+                                            Behavior on color { ColorAnimation { duration: 150 } }
+                                        }
+                                        MouseArea {
+                                            id: addTimeMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                // Add 15 minutes to the study timer
+                                                window.focusEndEpoch = window.focusEndEpoch + 900;
+                                                window.focusRemainSec = window.focusRemainSec + 900;
+                                                Quickshell.execDetached(["bash", "-c",
+                                                    "echo " + window.focusEndEpoch + " > ~/.cache/qs_focus_end"
+                                                ]);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                RowLayout {
+                                    anchors.fill: parent; spacing: 0
+                                    Repeater {
+                                        model: ListModel {
+                                            ListElement { name: "gaming";  icon: "󰊴" }
+                                            ListElement { name: "default"; icon: "󰗑" }
+                                            ListElement { name: "study";   icon: "󰑴" }
+                                        }
+                                        delegate: Item {
+                                            Layout.fillWidth: true; Layout.fillHeight: true
+                                            Text {
+                                                anchors.centerIn: parent
+                                                font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(14)
+                                                // Hide the default glyph when not in default — the
+                                                // centred countdown timer takes its place in study/gaming.
+                                                visible: !(name === "default" && window.focusMode !== "default")
+                                                color: (window.pendingFocusMode !== "" ? window.pendingFocusMode : window.focusMode) === name ? window.crust : (fMa.containsMouse ? window.text : window.subtext0)
+                                                text: icon
+                                                Behavior on color { ColorAnimation { duration: 200 } }
+                                            }
+                                            MouseArea {
+                                                id: fMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    // Block switching away from study mode while timer is running
+                                                    if (window.focusMode === "study" && window.focusEndEpoch > 0 && name !== "study") return;
+
+                                                    if (name === "default") {
+                                                        window.focusMode = "default";
+                                                        window.pendingFocusMode = "";
+                                                        window.focusEndEpoch = 0;
+                                                        window.focusRemainSec = 0;
+                                                        Quickshell.execDetached(["bash", "-c",
+                                                            "echo default > ~/.cache/qs_focus_mode; echo 0 > ~/.cache/qs_focus_end"
+                                                        ]);
+                                                    } else {
+                                                        // Don't change mode yet — just show time setter
+                                                        window.pendingFocusMode = name;
+                                                        window.focusSetMins = 60;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ── Time setter (replaces mode selector) ──
+                            RowLayout {
+                                id: timeSetter
+                                anchors.fill: parent
+                                anchors.margins: 0
+                                spacing: 0
+                                visible: parent.showTimeSetter
+                                opacity: visible ? 1 : 0
+                                Behavior on opacity { NumberAnimation { duration: 250 } }
+
+                                // Minus
+                                Rectangle {
+                                    Layout.preferredWidth: window.s(44)
+                                    Layout.fillHeight: true
+                                    radius: 0
+                                    color: minusMa.containsMouse ? window.surface1 : window.surface0
+                                    border.color: minusMa.containsMouse ? window.surface2 : window.surface1
+                                    border.width: 1
+                                    Behavior on color { ColorAnimation { duration: 150 } }
+                                    Text {
+                                        anchors.centerIn: parent; text: "-"
+                                        font.family: "JetBrains Mono"; font.weight: Font.Black; font.pixelSize: window.s(20)
+                                        color: minusMa.containsMouse ? window.text : window.subtext0
+                                        Behavior on color { ColorAnimation { duration: 150 } }
+                                    }
+                                    MouseArea {
+                                        id: minusMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: window.focusSetMins = Math.max(0, window.focusSetMins - 15)
+                                    }
+                                }
+
+                                // Time display — click to lock in
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    radius: 0
+                                    color: lockMa.containsMouse ? window.surface1 : window.surface0
+                                    border.color: lockMa.containsMouse
+                                        ? (window.pendingFocusMode === "gaming" ? window.red : window.green)
+                                        : window.surface1
+                                    border.width: 1
+                                    Behavior on color { ColorAnimation { duration: 150 } }
+                                    Behavior on border.color { ColorAnimation { duration: 200 } }
+
+                                    property string timeStr: {
+                                        if (window.focusSetMins <= 0) return "Cancel";
+                                        let h = Math.floor(window.focusSetMins / 60);
+                                        let m = window.focusSetMins % 60;
+                                        return h + ":" + (m < 10 ? "0" : "") + m;
+                                    }
+
+                                    Row {
+                                        anchors.centerIn: parent; spacing: window.s(8)
+                                        Text {
+                                            text: "󰥔"
+                                            font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(16)
+                                            color: window.pendingFocusMode === "gaming" ? window.red : window.green
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                        Text {
+                                            text: parent.parent.timeStr
+                                            font.family: "JetBrains Mono"; font.weight: Font.Black; font.pixelSize: window.s(18)
+                                            color: window.pendingFocusMode === "gaming" ? window.red : window.green
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                    }
+                                    MouseArea {
+                                        id: lockMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            if (window.focusSetMins <= 0) {
+                                                // Cancel — go back to default
+                                                window.focusMode = "default";
+                                                window.pendingFocusMode = "";
+                                                window.focusEndEpoch = 0;
+                                                window.focusRemainSec = 0;
+                                                Quickshell.execDetached(["bash", "-c",
+                                                    "echo default > ~/.cache/qs_focus_mode; echo 0 > ~/.cache/qs_focus_end"
+                                                ]);
+                                                return;
+                                            }
+                                            // Apply the pending mode and start timer
+                                            window.focusMode = window.pendingFocusMode;
+                                            let secs = window.focusSetMins * 60;
+                                            let end = Math.floor(Date.now() / 1000) + secs;
+                                            window.focusEndEpoch = end;
+                                            window.focusRemainSec = secs;
+                                            window.pendingFocusMode = "";
+                                            Quickshell.execDetached(["bash", "-c",
+                                                "echo " + window.focusMode + " > ~/.cache/qs_focus_mode; echo " + end + " > ~/.cache/qs_focus_end"
+                                            ]);
+                                        }
+                                    }
+                                }
+
+                                // Plus
+                                Rectangle {
+                                    Layout.preferredWidth: window.s(44)
+                                    Layout.fillHeight: true
+                                    radius: 0
+                                    color: plusMa.containsMouse ? window.surface1 : window.surface0
+                                    border.color: plusMa.containsMouse ? window.surface2 : window.surface1
+                                    border.width: 1
+                                    Behavior on color { ColorAnimation { duration: 150 } }
+                                    Text {
+                                        anchors.centerIn: parent; text: "+"
+                                        font.family: "JetBrains Mono"; font.weight: Font.Black; font.pixelSize: window.s(20)
+                                        color: plusMa.containsMouse ? window.text : window.subtext0
+                                        Behavior on color { ColorAnimation { duration: 150 } }
+                                    }
+                                    MouseArea {
+                                        id: plusMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                        onClicked: window.focusSetMins = Math.min(480, window.focusSetMins + 15)
+                                    }
+                                }
+                            }
+                        }
+
+                        // 3. VOLUME DOCK
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: window.s(58)
+                            radius: window.s(14)
+                            color: window.surface0
+                            border.color: window.surface1
+                            border.width: 1
+
+                            opacity: introSliders
+                            transform: Translate { y: window.s(20) * (1.0 - introSliders) }
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: window.s(14)
+                                spacing: window.s(12)
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: window.s(15)
+
+                                    Rectangle {
+                                        Layout.preferredWidth: window.s(32)
+                                        Layout.preferredHeight: window.s(32)
+                                        radius: window.s(16)
+                                        color: volIconMa.containsMouse ? window.surface1 : "transparent"
+                                        border.color: volIconMa.containsMouse ? window.blue : "transparent"
+                                        Behavior on color { ColorAnimation { duration: 150 } }
+                                        Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: window.sysMuted || window.sysVolume === 0 ? "󰖁" : (window.sysVolume > 50 ? "󰕾" : "󰖀")
+                                            font.family: "Iosevka Nerd Font"
+                                            font.pixelSize: window.s(22)
+                                            color: window.sysMuted ? window.overlay0 : window.blue
+                                            Behavior on color { ColorAnimation { duration: 200 } }
+                                        }
+                                        MouseArea {
+                                            id: volIconMa
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                volSyncDelay.stop();
+                                                window.isDraggingVol = true;
+                                                window.sysMuted = !window.sysMuted;
+                                                Quickshell.execDetached(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]);
+                                                volSyncDelay.restart();
+                                            }
+                                        }
+                                    }
+
+                                    Item {
+                                        Layout.fillWidth: true
+                                        height: window.s(18)
+
+                                        Timer {
+                                            id: volCmdThrottle
+                                            interval: 50
+                                            property int targetPct: -1
+                                            onTriggered: {
+                                                if (targetPct >= 0) {
+                                                    Quickshell.execDetached(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", targetPct + "%"]);
+                                                    targetPct = -1;
+                                                }
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            anchors.fill: parent
+                                            radius: window.s(9)
+                                            color: window.surface1
+                                            border.color: window.surface2
+                                            border.width: 1
+                                            clip: true
+
+                                            Rectangle {
+                                                height: parent.height
+                                                width: parent.width * (window.sysVolume / 100)
+                                                radius: window.s(9)
+                                                opacity: volMa.containsMouse ? 1.0 : 0.85
+                                                Behavior on opacity { NumberAnimation { duration: 200 } }
+                                                Behavior on width { enabled: !window.isDraggingVol; NumberAnimation { duration: 200; easing.type: Easing.OutQuint } }
+
+                                                gradient: Gradient {
+                                                    orientation: Gradient.Horizontal
+                                                    GradientStop { position: 0.0; color: window.sysMuted ? window.surface2 : window.blue }
+                                                    GradientStop { position: 1.0; color: window.sysMuted ? Qt.lighter(window.surface2, 1.15) : window.sapphire }
+                                                }
+                                            }
+                                        }
+                                        MouseArea {
+                                            id: volMa
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onPressed: function(mouse) { volSyncDelay.stop(); window.isDraggingVol = true; updateVol(mouse.x); }
+                                            onPositionChanged: function(mouse) { if (pressed) updateVol(mouse.x); }
+                                            onReleased: { volSyncDelay.restart(); }
+
+                                            function updateVol(mx) {
+                                                let pct = Math.max(0, Math.min(100, Math.round((mx / width) * 100)));
+                                                window.sysVolume = pct;
+                                                volCmdThrottle.targetPct = pct;
+                                                if (!volCmdThrottle.running) volCmdThrottle.start();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 4. SYSTEM ACTIONS DOCK
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: window.s(75)
+                            spacing: window.s(12)
+                            
+                            Repeater {
+                                model: ListModel {
+                                    ListElement { cmd: "XDG_CURRENT_DESKTOP=KDE systemsettings"; clickCmd: ""; icon: ""; baseColor: "red"; weight: 1.0 }
+                                    ListElement { cmd: "bash $HOME/.config/hypr/scripts/valorant.sh"; clickCmd: ""; icon: "󰍲"; baseColor: "blue"; weight: 1.0 }
+                                    ListElement { cmd: "systemctl reboot"; clickCmd: ""; icon: "󰑓"; baseColor: "yellow"; weight: 2.5 }
+                                    ListElement { cmd: "hyprctl dispatch dpms off"; clickCmd: "hyprctl dispatch dpms off"; icon: "󰶐"; baseColor: "mauve"; weight: 1.0 }
+                                }
+                                
+                                delegate: Rectangle {
+                                    id: actionCapsule
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    radius: window.s(14)
+
+                                    opacity: introActions
+                                    transform: Translate { y: window.s(30) * (1.0 - introActions) + (index * window.s(12) * (1.0 - introActions)) }
+                                    
+                                    property color c1: window[baseColor] || window.surface1
+                                    property color c2: Qt.lighter(c1, 1.2)
+
+                                    color: actionMa.containsMouse ? window.surface1 : window.surface0
+                                    border.color: actionMa.containsMouse ? c1 : window.surface2
+                                    border.width: actionMa.containsMouse ? 2 : 1
+                                    Behavior on color { ColorAnimation { duration: 200 } }
+                                    Behavior on border.color { ColorAnimation { duration: 200 } }
+                                    
+                                    scale: actionMa.pressed ? (0.98 - (0.01 * weight)) : (actionMa.containsMouse ? 1.08 : 1.0)
+                                    Behavior on scale { NumberAnimation { duration: 400; easing.type: Easing.OutQuart } }
+
+                                    property real fillLevel: 0.0
+                                    property bool triggered: false
+                                    property real flashOpacity: 0.0
+                                    
+                                    Canvas {
+                                        id: actionWaveCanvas
+                                        anchors.fill: parent
+                                        
+                                        property real wavePhase: 0.0
+                                        NumberAnimation on wavePhase {
+                                            running: actionCapsule.fillLevel > 0.0 && actionCapsule.fillLevel < 1.0
+                                            loops: Animation.Infinite
+                                            from: 0; to: Math.PI * 2; duration: 800
+                                        }
+                                        onWavePhaseChanged: requestPaint()
+                                        Connections { target: actionCapsule; function onFillLevelChanged() { actionWaveCanvas.requestPaint() } }
+                                        
+                                        onPaint: {
+                                            var ctx = getContext("2d");
+                                            ctx.clearRect(0, 0, width, height);
+                                            if (actionCapsule.fillLevel <= 0.001) return;
+                                            
+                                            var r = window.s(14); 
+                                            var fillY = height * (1.0 - actionCapsule.fillLevel);
+                                            ctx.save();
+                                            ctx.beginPath();
+                                            ctx.moveTo(r, 0); ctx.lineTo(width - r, 0); ctx.arcTo(width, 0, width, r, r);
+                                            ctx.lineTo(width, height - r); ctx.arcTo(width, height, width - r, height, r);
+                                            ctx.lineTo(r, height); ctx.arcTo(0, height, 0, height - r, r);
+                                            ctx.lineTo(0, r); ctx.arcTo(0, 0, r, 0, r); ctx.closePath(); ctx.clip(); 
+                                            
+                                            ctx.beginPath();
+                                            ctx.moveTo(0, fillY);
+                                            if (actionCapsule.fillLevel < 0.99) {
+                                                var waveAmp = window.s(10) * Math.sin(actionCapsule.fillLevel * Math.PI); 
+                                                var cp1y = fillY + Math.sin(wavePhase) * waveAmp;
+                                                var cp2y = fillY + Math.cos(wavePhase + Math.PI) * waveAmp;
+                                                ctx.bezierCurveTo(width * 0.33, cp2y, width * 0.66, cp1y, width, fillY);
+                                                ctx.lineTo(width, height); ctx.lineTo(0, height);
+                                            } else {
+                                                ctx.lineTo(width, 0); ctx.lineTo(width, height); ctx.lineTo(0, height);
+                                            }
+                                            ctx.closePath();
+                                            
+                                            var grad = ctx.createLinearGradient(0, 0, 0, height);
+                                            grad.addColorStop(0, actionCapsule.c1.toString()); grad.addColorStop(1, actionCapsule.c2.toString());
+                                            ctx.fillStyle = grad; ctx.fill(); ctx.restore();
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        anchors.fill: parent; radius: window.s(14); color: "#ffffff"
+                                        opacity: actionCapsule.flashOpacity
+                                        PropertyAnimation on opacity { id: cardFlashAnim; to: 0; duration: 500; easing.type: Easing.OutExpo }
+                                    }
+
+                                    Text { 
+                                        anchors.centerIn: parent
+                                        font.family: "Iosevka Nerd Font"
+                                        font.pixelSize: window.s(24)
+                                        color: actionMa.containsMouse ? window.text : window.subtext0
+                                        text: icon
+                                        Behavior on color { ColorAnimation { duration: 150 } }
+                                    }
+
+                                    Item {
+                                        anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+                                        height: actionCapsule.height * actionCapsule.fillLevel
+                                        clip: true
+                                        
+                                        Text { 
+                                            anchors.horizontalCenter: parent.horizontalCenter
+                                            y: (actionCapsule.height / 2) - (height / 2) - (actionCapsule.height - parent.height)
+                                            font.family: "Iosevka Nerd Font"
+                                            font.pixelSize: window.s(24)
+                                            color: window.crust
+                                            text: icon 
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: actionMa
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: actionCapsule.triggered ? Qt.ArrowCursor : Qt.PointingHandCursor
+                                        
+                                        onPressed: { 
+                                            if (!actionCapsule.triggered) { 
+                                                drainAnim.stop(); 
+                                                fillAnim.start(); 
+                                            }
+                                        }
+                                        onReleased: {
+                                            if (!actionCapsule.triggered && actionCapsule.fillLevel < 1.0) { 
+                                                fillAnim.stop();
+                                                // Quick tap: if clickCmd exists and fill barely started, run it
+                                                if (clickCmd !== "" && actionCapsule.fillLevel < 0.3) {
+                                                    Quickshell.execDetached(["sh", "-c", clickCmd]);
+                                                }
+                                                drainAnim.start(); 
+                                            }
+                                        }
+                                    }
+
+                                    NumberAnimation {
+                                        id: fillAnim; target: actionCapsule; property: "fillLevel"; to: 1.0
+                                        duration: (550 * weight) * (1.0 - actionCapsule.fillLevel); easing.type: Easing.InSine
+                                        onFinished: {
+                                            actionCapsule.triggered = true; actionCapsule.flashOpacity = 0.6; cardFlashAnim.start();
+                                            exitAnim.start(); exitTimer.start();
+                                        }
+                                    }
+                                    
+                                    NumberAnimation {
+                                        id: drainAnim; target: actionCapsule; property: "fillLevel"; to: 0.0
+                                        duration: 1500 * actionCapsule.fillLevel; easing.type: Easing.OutQuad
+                                    }
+
+                                    Timer {
+                                        id: exitTimer; interval: 500 
+                                        onTriggered: { Quickshell.execDetached(["sh", "-c", cmd]); Quickshell.execDetached(["sh", "-c", "echo 'close' > /tmp/qs_widget_state"]); }
+                                    }
+                                }
+                            }
+                        }
+
+
+                    // ── System maintenance overlay (preview + confirm actions) ──
+                        }
+                    }
+                }
+
+                    Rectangle {
+                        id: maintOverlay
+                        anchors.fill: parent
+                        z: 200
+                        visible: opacity > 0.01
+                        opacity: window.maintOpen ? 1 : 0
+                        // Fade in slightly slower than the modules fade out, so the
+                        // panel arrives just as the modules finish clearing.
+                        Behavior on opacity { NumberAnimation { duration: 280; easing.type: Easing.OutCubic } }
+                        color: Qt.rgba(window.crust.r, window.crust.g, window.crust.b, 0.92)
+
+                        // Click outside the card closes it.
+                        MouseArea { anchors.fill: parent; onClicked: window.maintOpen = false }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            anchors.margins: window.s(20)
+                            radius: window.s(16)
+                            color: window.base
+                            border.color: window.surface1; border.width: 1
+                            // Swallow clicks so they don't close via the backdrop.
+                            MouseArea { anchors.fill: parent }
+
+                            Column {
+                                anchors.fill: parent
+                                anchors.margins: window.s(18)
+                                spacing: window.s(12)
+
+                                // Header
+                                Item {
+                                    width: parent.width; height: window.s(26)
+                                    Text {
+                                        anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                                        text: "System Maintenance"
+                                        font.family: "JetBrains Mono"; font.weight: Font.Bold; font.pixelSize: window.s(15)
+                                        color: window.text
+                                    }
+                                    Text {
+                                        anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                        text: "󰅖"; font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(16)
+                                        color: closeMa.containsMouse ? window.red : window.subtext0
+                                        MouseArea { id: closeMa; anchors.fill: parent; anchors.margins: -window.s(6); hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: window.maintOpen = false }
+                                    }
+                                }
+
+                                // Summary counts
+                                Row {
+                                    width: parent.width; spacing: window.s(10)
+                                    visible: true
+                                    Repeater {
+                                        model: [
+                                            { lbl: "Updates", val: window.maintUpdates, col: window.maintUpdates > 0 ? window.peach : window.green },
+                                            { lbl: "Orphans", val: window.maintOrphans, col: window.maintOrphans > 0 ? window.yellow : window.green },
+                                            { lbl: "Vulns",   val: window.maintVulns,   col: window.maintVulns   > 0 ? window.red : window.green }
+                                        ]
+                                        Rectangle {
+                                            width: (parent.width - window.s(20)) / 3; height: window.s(54)
+                                            radius: window.s(10); color: window.surface0
+                                            Column {
+                                                anchors.centerIn: parent; spacing: window.s(2)
+                                                Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.val; font.family: "JetBrains Mono"; font.weight: Font.Bold; font.pixelSize: window.s(18); color: modelData.col }
+                                                Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.lbl; font.family: "JetBrains Mono"; font.pixelSize: window.s(9); color: window.text }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Checking spinner / detail text
+                                Text {
+                                    width: parent.width; visible: window.maintChecking && !window.consoleRunning
+                                    text: "Checking updates… (read-only)"
+                                    font.family: "JetBrains Mono"; font.pixelSize: window.s(11); color: window.text
+                                }
+
+                                Rectangle {
+                                    id: termBox
+                                    width: parent.width
+                                    height: parent.height - window.s(144)
+                                    radius: window.s(10); color: window.mantle
+                                    visible: true
+                                    clip: true
+                                    // A faint peach ring shows the terminal has keyboard focus.
+                                    border.color: pwField.activeFocus ? window.peach : "transparent"
+                                    border.width: 1
+                                    // Clicking anywhere in the terminal focuses its live input
+                                    // line, so you type STRAIGHT INTO the terminal — no separate box.
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: if (window.consoleInteractive) pwField.forceActiveFocus()
+                                    }
+                                    // Grab focus the moment a root task starts waiting for input.
+                                    Connections {
+                                        target: window
+                                        function onConsoleInteractiveChanged() { if (window.consoleInteractive) termFocusTimer.restart() }
+                                    }
+                                    Timer { id: termFocusTimer; interval: 80; repeat: false; onTriggered: pwField.forceActiveFocus() }
+                                    Flickable {
+                                        id: detailFlick
+                                        anchors.fill: parent; anchors.margins: window.s(10)
+                                        contentWidth: width; contentHeight: termCol.height
+                                        clip: true
+                                        // Auto-scroll to the bottom while the update streams.
+                                        onContentHeightChanged: if (window.consoleRunning) contentY = Math.max(0, contentHeight - height)
+                                        Column {
+                                            id: termCol
+                                            width: parent.width; spacing: window.s(2)
+                                            Text {
+                                                id: detailText
+                                                width: parent.width
+                                                text: (window.consoleRunning || window.consoleDone) ? window.consoleText : window.maintDetail
+                                                font.family: "JetBrains Mono"; font.pixelSize: window.s(10)
+                                                color: window.text; wrapMode: Text.Wrap
+                                            }
+                                            // Live input line — part of the terminal itself. The first
+                                            // Enter sends the sudo password (masked); every later Enter
+                                            // answers pacman's NATIVE [Y/n] prompts. No separate box,
+                                            // no --noconfirm — you drive the terminal directly.
+                                            Row {
+                                                width: parent.width
+                                                visible: window.consoleRunning && window.consoleInteractive
+                                                spacing: window.s(6)
+                                                Text {
+                                                    anchors.verticalCenter: pwField.verticalCenter
+                                                    text: window.consolePwSent ? "❯" : "󰌿"
+                                                    font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(11); color: window.peach
+                                                }
+                                                TextInput {
+                                                    id: pwField
+                                                    width: parent.width - window.s(24)
+                                                    focus: true; activeFocusOnTab: true; cursorVisible: true
+                                                    // Mask only the password (first submit); answers (y/n) shown plain.
+                                                    echoMode: window.consolePwSent ? TextInput.Normal : TextInput.Password
+                                                    passwordCharacter: "•"
+                                                    color: window.text; font.family: "JetBrains Mono"; font.pixelSize: window.s(11); clip: true
+                                                    onAccepted: {
+                                                        consoleProc.write(pwField.text + "\n");
+                                                        pwField.text = "";
+                                                        if (!window.consolePwSent) window.consolePwSent = true;
+                                                    }
+                                                    Text {
+                                                        anchors.fill: parent; verticalAlignment: Text.AlignVCenter
+                                                        visible: pwField.text === "" && !pwField.activeFocus
+                                                        text: window.consolePwSent ? "type y or n, then Enter" : "type sudo password, then Enter"
+                                                        color: window.overlay0; font: pwField.font
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Action buttons. Update streams into the console above
+                                // (in-QML); clean/orphans still open a visible terminal.
+                                Row {
+                                    id: actBtnRow
+                                    width: parent.width; spacing: window.s(8)
+                                    visible: !window.consoleRunning
+                                    property int vcount: window.maintOrphans > 0 ? 4 : 3
+
+                                    Repeater {
+                                        model: [
+                                            { lbl: "Update", act: "update", col: window.mauve, show: true },
+                                            { lbl: "Clean", act: "clean", col: window.sky, show: true },
+                                            { lbl: "Scan", act: "vuln", col: window.red, show: true },
+                                            { lbl: "Orphans", act: "orphans", col: window.yellow, show: window.maintOrphans > 0 }
+                                        ]
+                                        Rectangle {
+                                            visible: modelData.show
+                                            width: modelData.show ? (actBtnRow.width - window.s(8)*(actBtnRow.vcount-1)) / actBtnRow.vcount : 0
+                                            height: window.s(34); radius: window.s(10)
+                                            color: abtnMa.containsMouse ? Qt.rgba(modelData.col.r, modelData.col.g, modelData.col.b, 0.22) : window.surface0
+                                            border.color: abtnMa.containsMouse ? modelData.col : window.surface1; border.width: 1
+                                            Behavior on color { ColorAnimation { duration: 120 } }
+                                            Text {
+                                                anchors.centerIn: parent; text: modelData.lbl
+                                                font.family: "JetBrains Mono"; font.weight: Font.Medium; font.pixelSize: window.s(11)
+                                                color: abtnMa.containsMouse ? modelData.col : window.text
+                                            }
+                                            MouseArea {
+                                                id: abtnMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    // All maintenance streams into the in-popup console. Update runs
+                                                    // interactively (pacman -Syu, no --noconfirm) so you can review
+                                                    // the package list and type y in the field to confirm.
+                                                    if (modelData.act === "update")  window.runConsole("update",     window.consoleInnerUpdate,  true);
+                                                    else if (modelData.act === "clean")   window.runConsole("clean",      window.consoleInnerClean,   true);
+                                                    else if (modelData.act === "orphans") window.runConsole("orphans",    window.consoleInnerOrphans, true);
+                                                    else if (modelData.act === "vuln")    window.runConsole("vuln scan",  window.consoleInnerVuln,    false);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+            }
+        }
+    }

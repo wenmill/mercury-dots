@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# music provider — stream a Subsonic/Navidrome track id into the PiP (audio).
+# Reads navidrome_url / navidrome_user / navidrome_pass from config.json and
+# builds a token-authed stream URL (t = md5(pass + salt)), same scheme the widget
+# uses. "video" for symmetry — audio rides the same PiP transport.
+set -uo pipefail
+: "${VIDEO_DIR:=$(cd "$(dirname "$0")/.." && pwd)}"
+source "$VIDEO_DIR/lib/common.sh"
+
+stream_url() {
+    local id="$1" url user pass salt token
+    url="$(vid_cfg navidrome_url)"; user="$(vid_cfg navidrome_user)"; pass="$(vid_secret navidrome_pass)"
+    if [ -z "$url" ] || [ -z "$user" ] || [ -z "$pass" ]; then
+        echo "music: navidrome_url/user/pass missing in config.json" >&2; return 1
+    fi
+    salt="$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    token="$(printf '%s' "${pass}${salt}" | md5sum | awk '{print $1}')"
+    printf '%s/rest/stream?u=%s&t=%s&s=%s&v=1.16.1&c=qsmovies&f=json&id=%s\n' \
+        "$url" "$user" "$token" "$salt" "$id"
+}
+
+verb="${1:-}"; shift 2>/dev/null || true
+case "$verb" in
+    capabilities) echo "play resolve" ;;
+    resolve) printf '{"url":"%s"}\n' "$(stream_url "${1:?song id required}")" ;;
+    play)
+        id="${1:?song id required}"; u="$(stream_url "$id")" || exit 1
+        vlog "music play :: $id"; vid_load "$u"
+        ;;
+    *) echo "music: unknown verb '$verb'" >&2; exit 2 ;;
+esac

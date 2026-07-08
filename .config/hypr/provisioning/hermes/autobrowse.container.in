@@ -1,0 +1,20 @@
+[Unit]
+Description=stealthy-auto-browse (Camoufox stealth browser, MCP server for Hermes)
+After=network-online.target
+
+[Container]
+Image=docker.io/psyb0t/stealthy-auto-browse:latest
+ContainerName=autobrowse
+PublishPort=127.0.0.1:8080:8080
+PublishPort=127.0.0.1:5900:5900
+Environment=TZ=__TZ__
+Environment=AUTH_TOKEN=__AUTOBROWSE_TOKEN__
+Volume=autobrowse-profile:/userdata
+AutoUpdate=registry
+
+[Service]
+Restart=always
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target

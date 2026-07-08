@@ -1,0 +1,1 @@
+http://localhost:7000/%7B%22dearrow%22%3A1%2C%22sponsorblock%22%3A%5B%22sponsor%22%2C%22selfpromo%22%2C%22preview%22%5D%2C%22markWatchedOnLoad%22%3A1%2C%22showBrokenLinks%22%3A1%7D/manifest.json

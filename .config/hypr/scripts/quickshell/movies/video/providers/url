@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# url provider — play an arbitrary direct URL or local file in the PiP.
+# The simplest possible provider; a good template for wiring in a new source.
+set -uo pipefail
+: "${VIDEO_DIR:=$(cd "$(dirname "$0")/.." && pwd)}"
+source "$VIDEO_DIR/lib/common.sh"
+
+verb="${1:-}"; shift 2>/dev/null || true
+case "$verb" in
+    capabilities) echo "play resolve" ;;
+    resolve) printf '{"url":%s}\n' "$(printf '%s' "${1:?url required}" | jq -Rs .)" ;;
+    play)    vlog "url play :: $1"; vid_load "$@" ;;   # passes through mpv-flags too
+    *) echo "url: unknown verb '$verb'" >&2; exit 2 ;;
+esac

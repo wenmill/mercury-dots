@@ -1,0 +1,89 @@
+# `backends/` — pluggable streaming sources
+
+This is where you add your own video **sources**. The `movie` / `tv` / `anime`
+providers are thin — they just dispatch to a backend here. Drop a new executable
+in this folder and it's available; no QML, no provider changes.
+
+```
+video/backends/
+├── movcli               # movies + TV via mov-cli
+├── lobster              # movies + TV via lobster-git
+├── anicli               # anime via ani-cli
+└── jellyfin.example     # WORKED TEMPLATE — cp to `jellyfin`, fill in, enable
+```
+
+## Selecting a backend
+
+Per-kind, in `~/.config/hypr/config.json`:
+
+```jsonc
+"movie_backend": "lobster",     // unset → default chain below
+"tv_backend":    "movcli",
+"anime_backend": "anicli"
+```
+
+Each kind has a **fallback chain**: the configured backend is tried first, then
+the built-in defaults, so a dead source cascades to the next one:
+
+| kind | default chain |
+|---|---|
+| movie | `lobster → movcli` |
+| tv | `lobster → movcli` |
+| anime | `anicli` |
+
+Setting `"movie_backend": "jellyfin"` makes the chain `jellyfin → lobster → movcli`.
+
+## The backend contract
+
+A backend is **any executable** here. It's called as `backends/<name> <verb> …`:
+
+| Verb | Args | Must do |
+|---|---|---|
+| `capabilities` | — | Print the space-separated **kinds** it serves, e.g. `movie tv`. |
+| `play` | `<kind> <title> [season] [ep]` | Start playback in the PiP. **Exit non-zero on failure** (no match / source down) so the dispatcher falls through to the next backend. |
+| `browse` | `<kind> [query]` | Optional: launch an interactive picker into the PiP. `exec` it (it's the first capable backend that runs). |
+
+Helpers you get from `source "$VIDEO_DIR/lib/common.sh"`:
+
+- `vid_load <url> [mpv-flags…]` — load a direct URL into the PiP (for API sources
+  like Jellyfin that already have a stream URL — no shim needed).
+- `vid_run_headless <cmd…>` — run a scraper CLI (its `mpv`/`fzf` are shimmed to the
+  PiP + auto-pick). Fire-and-forget; ignores the CLI's exit code.
+- `vid_run_checked '<fail-regex>' <cmd…>` — same, but **captures output and returns
+  failure** when the regex matches (many scrapers exit 0 even on "no results").
+- `vid_cfg <key>` — read a key from `config.json` (your server URL, token, …).
+- `vlog` / `vnotify` — log / desktop-notify.
+
+## Add a Jellyfin (or any) source in a few minutes
+
+`jellyfin.example` is a complete, commented starting point — it talks to the
+Jellyfin REST API and hands mpv a direct-play URL (no scraper needed):
+
+```bash
+cd movies/video/backends
+cp jellyfin.example jellyfin && chmod +x jellyfin
+# then in ~/.config/hypr/config.json:
+#   "jellyfin_url": "http://server:8096",
+#   "jellyfin_token": "<Dashboard → API Keys>",
+#   "movie_backend": "jellyfin"
+video play movie "Dune"      # streams from Jellyfin; falls back if it's not there
+```
+
+Minimal skeleton for a brand-new source:
+
+```bash
+#!/usr/bin/env bash
+set -uo pipefail
+: "${VIDEO_DIR:=$(cd "$(dirname "$0")/.." && pwd)}"
+source "$VIDEO_DIR/lib/common.sh"
+verb="${1:-}"; kind="${2:-}"; shift 2 2>/dev/null || true
+case "$verb" in
+  capabilities) echo "movie tv" ;;
+  play)
+    title="${1:?}"
+    url="$(my_lookup "$title")" || { vlog "mysrc: no match"; exit 1; }  # exit≠0 → fall through
+    vid_load "$url" ;;
+  browse) : ;;   # optional
+  *) exit 2 ;;
+esac
+```

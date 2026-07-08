@@ -1,0 +1,28 @@
+# ── secrets & machine-local state (never commit) ─────────────────────────────
+.config/hypr/config.json
+.config/hypr/ai_config.json
+.config/hypr/settings.json
+**/.env
+*.pem
+*.key
+
+# ── generated / vendored / build output ──────────────────────────────────────
+.config/hypr/llama-cpp-turboquant/
+.config/hypr/scripts/quickshell/floating/obsidian-shell/build/
+.config/hypr/scripts/quickshell/pip/mpvplugin/build/
+__pycache__/
+*.pyc
+build/
+
+# ── backups & junk ────────────────────────────────────────────────────────────
+*.log
+*.bak
+*.bak-embed
+*~
+*.pre-cleanup-backup
+.removed-*/
+# Machine-local tooling state / build artifacts (contain absolute personal paths)
+.config/hypr/.claude/
+.config/hypr/scripts/quickshell/pip/shim-auto/
+.config/hypr/scripts/quickshell/pip/qml/PipMpv/pipmpv_qml_module_dir_map.qrc
+.local/share/fonts/**/.uuid

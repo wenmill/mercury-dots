@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# =============================================================================
+# video — the movies widget's unified video CLI.
+# -----------------------------------------------------------------------------
+# One command for every video operation, backed by pluggable providers so a new
+# source is a drop-in file (see providers/ + README.md). The QML widget calls
+# ONLY this; it never talks to mov-cli/ani-cli/yt-dlp/mpv directly.
+#
+#   video play    <kind> <query|id> [season] [ep]   resolve + play into the PiP
+#   video resolve <kind> <query|id> [season] [ep]   print stream JSON, don't play
+#   video search  <kind> <query>                    print results (provider format)
+#   video episodes<kind> <id>                       list episodes (if supported)
+#   video browse  <kind> [query]                    open an interactive browser
+#   video load    <url> [mpv-flags…]                load a direct URL/file (kindless)
+#   video ipc     '<json>'                          raw mpv IPC to the PiP
+#   video popout  <url> [start]                     pop out to a floating window
+#   video providers                                 list providers + capabilities
+#
+# kinds are whatever executables live in providers/ (movie tv anime youtube music url …)
+# =============================================================================
+set -uo pipefail
+VIDEO_DIR="$(cd "$(dirname "$0")" && pwd)"
+export VIDEO_DIR
+# shellcheck source=lib/common.sh
+source "$VIDEO_DIR/lib/common.sh"
+PROV_DIR="$VIDEO_DIR/providers"
+
+usage() { sed -n '2,/^# ===/p' "$0" | sed 's/^# \{0,1\}//; s/^=.*//'; }
+
+verb="${1:-help}"; shift 2>/dev/null || true
+
+case "$verb" in
+    play|resolve|search|episodes|browse|capabilities)
+        kind="${1:-}"; shift 2>/dev/null || true
+        [ -n "$kind" ] || { echo "video $verb: missing <kind> (try: video providers)" >&2; exit 2; }
+        prov="$PROV_DIR/$kind"
+        [ -x "$prov" ] || { echo "video: no provider for kind '$kind' ($PROV_DIR/$kind)" >&2; exit 3; }
+        exec "$prov" "$verb" "$@"
+        ;;
+    load)      vid_load "$@" ;;
+    ipc)       vid_ipc "${1:-}" ;;
+    popout)    vid_popout "$@" ;;
+    providers)
+        for p in "$PROV_DIR"/*; do
+            [ -x "$p" ] || continue
+            printf '%-9s %s\n' "$(basename "$p")" "$("$p" capabilities 2>/dev/null)"
+        done
+        ;;
+    help|-h|--help) usage ;;
+    *) echo "video: unknown verb '$verb'" >&2; usage; exit 2 ;;
+esac

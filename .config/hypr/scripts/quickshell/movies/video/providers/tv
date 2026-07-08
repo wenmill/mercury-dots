@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# tv provider — thin dispatcher to the selected backend.
+# Backend chosen by config.json "tv_backend" (default chain: lobster → movcli);
+# only movcli hits an EXACT episode (lobster defers non-S1E1, so the dispatcher
+# falls through to movcli). Add your own source in ../backends/ — see its README.
+set -uo pipefail
+: "${VIDEO_DIR:=$(cd "$(dirname "$0")/.." && pwd)}"
+source "$VIDEO_DIR/lib/common.sh"
+
+verb="${1:-}"; shift 2>/dev/null || true
+case "$verb" in
+    capabilities) echo "play browse" ;;
+    play)    vid_dispatch tv play "$@" ;;      # "$@" = <title> [season] [ep]
+    browse)  vid_dispatch tv browse "$@" ;;
+    resolve) echo "tv: resolve unsupported (backend resolves internally)" >&2; exit 1 ;;
+    *) echo "tv: unknown verb '$verb'" >&2; exit 2 ;;
+esac

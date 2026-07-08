@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# anicli backend — anime via ani-cli (headless, auto-first source + episode).
+set -uo pipefail
+: "${VIDEO_DIR:=$(cd "$(dirname "$0")/.." && pwd)}"
+source "$VIDEO_DIR/lib/common.sh"
+
+verb="${1:-}"; kind="${2:-}"; shift 2 2>/dev/null || true
+case "$verb" in
+    capabilities) echo "anime" ;;
+    play)
+        command -v ani-cli >/dev/null 2>&1 || { vnotify "ani-cli is not installed (paru -S ani-cli)"; exit 1; }
+        title="${1:?title required}"; ep="${2:-1}"; mode="${3:-sub}"; idx="${4:-1}"
+        # idx = 1-based result index from anime_epcount.sh's best-match, so we
+        # play the SAME show the episode counts came from (blind -S 1 kept
+        # hitting movies/spin-offs for ambiguous titles).
+        case "$idx" in ''|*[!0-9]*) idx=1 ;; esac
+        [ "$idx" -lt 1 ] && idx=1
+        dubflag=()
+        [ "$mode" = "dub" ] && dubflag=(--dub)
+        vlog "anicli anime :: $title e$ep ($mode, result #$idx)"
+        vid_run_checked 'no results found|no results' ani-cli -S "$idx" "${dubflag[@]}" -e "$ep" "$title"
+        ;;
+    browse) exec bash "$PIP_DIR/pip_anicli.sh" "$@" ;;
+    *) exit 2 ;;
+esac

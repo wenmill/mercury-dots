@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# movie provider — thin dispatcher to the selected backend.
+# Backend chosen by config.json "movie_backend" (default chain: lobster → movcli),
+# resolved + fallback-handled by vid_dispatch. Add your own source as a drop-in
+# file in ../backends/ (e.g. Jellyfin) — see ../backends/README.md.
+set -uo pipefail
+: "${VIDEO_DIR:=$(cd "$(dirname "$0")/.." && pwd)}"
+source "$VIDEO_DIR/lib/common.sh"
+
+verb="${1:-}"; shift 2>/dev/null || true
+case "$verb" in
+    capabilities) echo "play browse" ;;
+    play)    vid_dispatch movie play "$@" ;;
+    browse)  vid_dispatch movie browse "$@" ;;
+    resolve) echo "movie: resolve unsupported (backend resolves internally)" >&2; exit 1 ;;
+    *) echo "movie: unknown verb '$verb'" >&2; exit 2 ;;
+esac

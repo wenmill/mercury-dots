@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# jellyfin backend (EXAMPLE) — stream your own Jellyfin server.
+# ─────────────────────────────────────────────────────────────────────────────
+# This is a WORKED TEMPLATE. To enable it:
+#   1. cp backends/jellyfin.example backends/jellyfin && chmod +x backends/jellyfin
+#   2. add to ~/.config/hypr/config.json:
+#        "jellyfin_url":   "http://your-server:8096",
+#        "jellyfin_token": "<an API key from JF: Dashboard → API Keys>",
+#        "movie_backend":  "jellyfin",   // and/or "tv_backend", "anime_backend"
+#   3. that's it — `video play movie "Dune"` now streams from Jellyfin, and if
+#      Jellyfin has nothing it falls through to your next backend (lobster/movcli).
+#
+# It implements the backend contract:
+#   capabilities                  -> kinds served
+#   play <kind> <title> [s] [e]   -> resolve a direct stream URL, load it into the
+#                                    PiP with vid_load, and EXIT NON-ZERO on miss
+#                                    (so the dispatcher can fall through)
+#   browse <kind> [query]         -> optional; here it opens the JF web UI
+#
+# Jellyfin needs no scraper/shim — it's your library over HTTP, so this talks to
+# the JF REST API directly and hands mpv a direct-play URL. Requires curl + jq.
+set -uo pipefail
+: "${VIDEO_DIR:=$(cd "$(dirname "$0")/.." && pwd)}"
+source "$VIDEO_DIR/lib/common.sh"
+
+JF_URL="$(vid_cfg jellyfin_url)"
+JF_TOKEN="$(vid_cfg jellyfin_token)"
+
+jf_api() { curl -sf -m 12 -H "X-Emby-Token: $JF_TOKEN" "$JF_URL$1"; }
+
+# First matching item Id for a search term, filtered to the given JF item types.
+jf_first_id() {   # <searchTerm> <IncludeItemTypes>
+    jf_api "/Items?searchTerm=$(jq -rn --arg s "$1" '$s|@uri')&IncludeItemTypes=$2&Recursive=true&Limit=1&Fields=Path" \
+        2>/dev/null | jq -r '.Items[0].Id // empty'
+}
+
+# A direct-play stream URL for an item Id (static=true = remux/direct, no transcode).
+jf_stream_url() { printf '%s/Videos/%s/stream?static=true&api_key=%s' "$JF_URL" "$1" "$JF_TOKEN"; }
+
+verb="${1:-}"; kind="${2:-}"; shift 2 2>/dev/null || true
+case "$verb" in
+    capabilities) echo "movie tv anime" ;;   # trim to what your library holds
+    play)
+        [ -n "$JF_URL" ] && [ -n "$JF_TOKEN" ] || { vlog "jellyfin: url/token not configured"; exit 1; }
+        title="${1:?title required}"
+        id=""
+        case "$kind" in
+            movie) id="$(jf_first_id "$title" "Movie")" ;;
+            anime|tv)
+                season="${2:-1}"; ep="${3:-1}"
+                series="$(jf_first_id "$title" "Series")"
+                if [ -n "$series" ]; then
+                    # Nth episode of the requested season (1-indexed).
+                    id="$(jf_api "/Shows/$series/Episodes?season=$season&api_key=$JF_TOKEN" 2>/dev/null \
+                          | jq -r --argjson n "$ep" '.Items[$n-1].Id // empty')"
+                fi
+                ;;
+        esac
+        [ -n "$id" ] || { vlog "jellyfin: no '$kind' match for '$title'"; exit 1; }   # → dispatcher falls through
+        vlog "jellyfin $kind :: $title -> $id"
+        vid_load "$(jf_stream_url "$id")"
+        ;;
+    browse)
+        # No native picker here — just open the Jellyfin web UI. (Or build an fzf
+        # picker over jf_api "/Items?..." and vid_load the choice, like the example
+        # above, for an in-PiP browse experience.)
+        [ -n "$JF_URL" ] && exec xdg-open "$JF_URL" || { vnotify "jellyfin_url not set"; exit 1; }
+        ;;
+    *) exit 2 ;;
+esac
