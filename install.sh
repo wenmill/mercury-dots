@@ -108,6 +108,36 @@ step_warn() { _step_line "$1" "$C_YELLOW" "WARN"; INSTALL_WARNS+=("$1${2:+ — $
 # step_fail <label> [hint]  — this component is broken and needs a human
 step_fail() { _step_line "$1" "$C_RED"    "FAIL"; INSTALL_FAILS+=("$1${2:+ — $2}"); }
 
+# ── podman short-name resolution ──────────────────────────────────────────────
+# An unqualified image name (`redis:8.2`, `pgvector/pgvector:pg15`) only resolves
+# if podman has an unqualified-search-registries list. containers-common normally
+# supplies one in /usr/share/containers/registries.conf, but that file is not
+# guaranteed to exist, and when it is missing podman fails outright with
+#     "short name ... did not resolve to an alias and no containers-registries.conf(5) was found"
+# Everything this installer pulls itself is fully qualified, so the breakage only
+# shows up in third-party compose files (Honcho's), where the failed image pull
+# then cascades into "no container with name honcho_database_1" for every service
+# that depends on it. Ask podman what it actually resolved rather than guessing
+# which file ought to exist, and only write a config when there is none.
+ensure_podman_registries() {
+    command -v podman &>/dev/null || return 0
+    local conf="$HOME/.config/containers/registries.conf"
+    [ -f "$conf" ] && return 0                       # never overwrite a user's file
+    local reg
+    reg="$(timeout 15 podman info --format '{{.Registries}}' </dev/null 2>/dev/null)"
+    case "$reg" in *"search:["*) return 0 ;; esac    # already resolvable
+    mkdir -p "$(dirname "$conf")"
+    cat > "$conf" <<'REGEOF'
+# Written by the mercury-dots installer: podman had no registries.conf, so short
+# image names could not resolve at all. "permissive" keeps resolution
+# non-interactive — the installer runs with stdin closed, and podman's default
+# "prompt" mode would ask a question nobody can answer, which is a hang.
+unqualified-search-registries = ["docker.io"]
+short-name-mode = "permissive"
+REGEOF
+    printf "  -> podman registries.conf written %-13s ${C_GREEN}[ OK ]${RESET}\n" ""
+}
+
 HEADLESS=false
 
 while [[ "$#" -gt 0 ]]; do
@@ -1562,6 +1592,7 @@ QUADLET_DIR="$HOME/.config/containers/systemd"
 if [ "$OPT_CONTAINERS" = true ]; then
     echo -e "\n${C_CYAN}[ INFO ]${RESET} Setting up containers (podman quadlets)..."
     mkdir -p "$QUADLET_DIR"
+    ensure_podman_registries
 
     systemctl --user enable podman.socket >/dev/null 2>&1 && \
         printf "  -> podman user socket enabled %-17s ${C_GREEN}[ OK ]${RESET}\n" ""
@@ -1862,6 +1893,10 @@ OLLAMAEOF
         # a file exists: podman-compose is a Python script that dies on a broken
         # podman, and `docker compose version` answers happily with no daemon
         # behind it, so the next call is what blocks. Exercise each candidate.
+        # Honcho's compose file is the one place that uses short image names, so
+        # this must hold even when the containers step above did not run.
+        ensure_podman_registries
+
         HONCHO_COMPOSE=""
         if command -v podman &>/dev/null && timeout 20 podman info &>/dev/null </dev/null; then
             systemctl --user start podman.socket &>/dev/null || true
