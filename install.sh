@@ -1490,14 +1490,55 @@ printf '[D-BUS Service]\nName=org.freedesktop.secrets\nExec=/usr/bin/ksecretd\n'
     > "$HOME/.local/share/dbus-1/services/org.freedesktop.secrets.service"
 printf "  -> KWallet (ksecretd) serves the Secret Service %-1s ${C_GREEN}[ OK ]${RESET}\n" ""
 
-# If gnome-keyring is also installed, stop it from claiming the Secret Service.
+# The wallet itself. Nothing above creates one: ksecretd serves the Secret
+# Service, but the *wallet* it serves from is created by pam_kwallet5 at login,
+# using the password you already typed. Without that module the wallet never
+# exists, `secret-tool store` blocks on a graphical creation prompt, and the
+# whole keyring is silently empty — which is exactly what happened.
+#
+# The PAM lines are prefixed '-', meaning "skip if the module is missing", so a
+# distro that ships them (SDDM does) still boots fine with no kwallet-pam
+# installed. That silence is the trap: everything looks configured.
+if [ ! -e /usr/lib/security/pam_kwallet5.so ]; then
+    step_warn "kwallet-pam missing" "no wallet will be created at login"
+else
+    # SDDM ships the kwallet lines already. A TTY login (uwsm start
+    # hyprland.desktop, which this installer recommends) goes through
+    # /etc/pam.d/login, which does not — so a TTY session never unlocks a
+    # wallet. Add them there, keeping the '-' prefix so a later package
+    # removal degrades instead of locking anyone out.
+    if ! grep -q "pam_kwallet5" /etc/pam.d/login 2>/dev/null; then
+        sudo cp /etc/pam.d/login /etc/pam.d/login.bak-mercury 2>/dev/null || true
+        printf -- '-auth       optional    pam_kwallet5.so\n-session    optional    pam_kwallet5.so         auto_start\n' \
+            | sudo tee -a /etc/pam.d/login >/dev/null 2>&1 \
+            && printf "  -> pam_kwallet5 added to /etc/pam.d/login %-5s ${C_GREEN}[ OK ]${RESET}\n" "" \
+            || step_warn "could not add pam_kwallet5 to /etc/pam.d/login"
+    fi
+fi
+
+# Two Secret Service providers cannot both own org.freedesktop.secrets. Whoever
+# claims the bus name first wins, and gnome-keyring is started by PAM before the
+# session even begins, so masking its systemd units is not enough — its PAM
+# lines have to go too. Commenting rather than deleting: reversible, and visible
+# to whoever reads the file next.
 if pacman -Q gnome-keyring &>/dev/null; then
     mkdir -p "$HOME/.config/autostart"
     for f in gnome-keyring-secrets gnome-keyring-pkcs11; do
         printf '[Desktop Entry]\nType=Application\nName=%s\nHidden=true\n' "$f" > "$HOME/.config/autostart/$f.desktop"
     done
     systemctl --user mask gnome-keyring-daemon.service gnome-keyring-daemon.socket >/dev/null 2>&1 || true
-    echo -e "  -> ${C_YELLOW}gnome-keyring demoted. Also remove pam_gnome_keyring lines from /etc/pam.d/sddm.${RESET}"
+
+    for pamfile in /etc/pam.d/sddm /etc/pam.d/sddm-autologin /etc/pam.d/login; do
+        [ -f "$pamfile" ] || continue
+        grep -qE '^[^#]*pam_gnome_keyring' "$pamfile" 2>/dev/null || continue
+        sudo cp "$pamfile" "$pamfile.bak-mercury" 2>/dev/null || true
+        sudo sed -i -E 's|^([^#]*pam_gnome_keyring.*)$|# disabled by mercury-dots (KWallet owns the Secret Service): \1|' \
+            "$pamfile" 2>/dev/null \
+            && printf "  -> pam_gnome_keyring disabled in %-14s %-1s ${C_GREEN}[ OK ]${RESET}\n" "$(basename "$pamfile")" "" \
+            || step_warn "could not disable pam_gnome_keyring in $pamfile"
+    done
+    echo -e "  -> ${DIM}Backups at *.bak-mercury. Existing gnome-keyring secrets:"
+    echo -e "     run scripts/keyring_migrate.sh BEFORE logging out.${RESET}"
 fi
 echo -e "  ${DIM}Store API tokens with: $HYPR_DIR/scripts/secrets.sh set <key> <value>${RESET}"
 echo -e "  ${DIM}List known keys with:  $HYPR_DIR/scripts/secrets.sh list${RESET}"
