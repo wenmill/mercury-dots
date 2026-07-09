@@ -1819,88 +1819,210 @@ OLLAMAEOF
         fi
     fi
 
-    # ── Honcho (cross-session memory for Hermes) — interactive, third-party ──
+    # ── Honcho (cross-session memory for Hermes) — third-party, containerised ──
     #
-    # Every command here runs with stdin closed and under a timeout. Both matter:
-    # this step used to hang forever because its output went to /dev/null while
-    # its stdin stayed on the terminal, so when podman asked "? Please select an
-    # image:" (short-name resolution) or git asked for credentials, the prompt
-    # was discarded and the read blocked for as long as you let it. </dev/null
-    # turns those into an immediate error; the timeout catches a genuinely stuck
-    # build. Output goes to a log we name, not to a black hole.
+    # This step used to hang forever, and the reason is worth stating once: its
+    # output went to /dev/null while its stdin stayed on the terminal, so any
+    # prompt (podman image selection, git credentials) was discarded while the
+    # read blocked. Nothing below inherits the terminal. Every command that can
+    # touch the network, a daemon, or a build runs under `timeout` with stdin
+    # closed and output in a named log. If it can't finish, it says so and the
+    # install moves on — Honcho is optional, and Hermes degrades without it.
+    #
+    # Env overrides:  HONCHO_INSTALL=yes|no   skip the prompt entirely
+    #                 HONCHO_BUILD_TIMEOUT=N  seconds for the image build
+    #                 HONCHO_REBUILD=1        rebuild even if the stack is up
     if [ "$HEADLESS" != "true" ]; then
         echo -e "\n${C_CYAN}[ INFO ]${RESET} Honcho (cross-session memory for Hermes)..."
-        HONCHO_DIR="$HOME/.honcho/src"
         HONCHO_REPO="https://github.com/plastic-labs/honcho.git"
         HONCHO_LOG="/tmp/honcho-install.log"
+        HONCHO_PROJECT="honcho"                                # pinned, see below
+        HONCHO_HEALTH="http://127.0.0.1:8000/health"           # api runs network_mode: host
         HONCHO_BUILD_TIMEOUT="${HONCHO_BUILD_TIMEOUT:-1800}"   # 30 min, then give up
+        HONCHO_NEED_KB=5242880                                 # ~5 GiB for images + build
 
-        # podman first — this desktop is rootless-podman by design. Only accept
-        # docker if its daemon actually answers; the compose plugin reports a
-        # version happily with no daemon behind it, and every later call blocks.
+        # An earlier installer cloned to ~/honcho and its containers still carry
+        # that project name. Adopt an existing checkout rather than creating a
+        # second one; only a fresh machine gets the tidy ~/.honcho/src path.
+        if [ -d "$HOME/honcho/.git" ]; then
+            HONCHO_DIR="$HOME/honcho"
+        else
+            HONCHO_DIR="$HOME/.honcho/src"
+        fi
+
+        # Dump the tail of the log next to a failure. Without this the log is a
+        # path nobody opens; with it, the reason is on screen where it happened.
+        _honcho_why() {
+            [ -s "$HONCHO_LOG" ] || return 0
+            echo -e "     ${DIM}last lines of $HONCHO_LOG:${RESET}"
+            tail -n 8 "$HONCHO_LOG" 2>/dev/null | sed 's/^/       /'
+        }
+
+        # Pick a compose implementation and prove it runs. `command -v` only says
+        # a file exists: podman-compose is a Python script that dies on a broken
+        # podman, and `docker compose version` answers happily with no daemon
+        # behind it, so the next call is what blocks. Exercise each candidate.
         HONCHO_COMPOSE=""
-        if command -v podman-compose &>/dev/null; then
-            HONCHO_COMPOSE="podman-compose"
-            systemctl --user start podman.socket >/dev/null 2>&1 || true
-        elif command -v podman &>/dev/null && podman compose version &>/dev/null </dev/null; then
-            HONCHO_COMPOSE="podman compose"
-        elif command -v docker &>/dev/null && timeout 10 docker info &>/dev/null </dev/null; then
+        if command -v podman &>/dev/null && timeout 20 podman info &>/dev/null </dev/null; then
+            systemctl --user start podman.socket &>/dev/null || true
+            if command -v podman-compose &>/dev/null && \
+               timeout 20 podman-compose version &>/dev/null </dev/null; then
+                HONCHO_COMPOSE="podman-compose"
+            elif timeout 20 podman compose version &>/dev/null </dev/null; then
+                HONCHO_COMPOSE="podman compose"
+            fi
+        fi
+        if [ -z "$HONCHO_COMPOSE" ] && command -v docker &>/dev/null && \
+           timeout 20 docker info &>/dev/null </dev/null; then
             HONCHO_COMPOSE="docker compose"
         fi
 
+        # Consent. Never read from a stdin that isn't a terminal: under
+        # `curl … | bash` the script's own text is on stdin and `read` would
+        # silently swallow the next line of the installer.
+        # "warned" means we already printed a [WARN] saying why; "no" means the
+        # user declined and deserves a plain one-liner instead of a second line.
+        HONCHO_WANT="${HONCHO_INSTALL:-}"
         if [ -z "$HONCHO_COMPOSE" ]; then
-            step_warn "Honcho skipped" "needs podman-compose (or a running docker)"
-        else
-            echo -e "  -> ${C_YELLOW}Honcho is third-party (plastic-labs, AGPL-3.0).${RESET}"
-            read -rp "  Install & start Honcho now? [y/N] " yn
-            if [[ "$yn" =~ ^[Yy]$ ]]; then
-                : > "$HONCHO_LOG"
-                honcho_ok=true
+            HONCHO_WANT="warned"
+            step_warn "Honcho skipped" "no working podman-compose or docker daemon"
+        elif [ -z "$HONCHO_WANT" ]; then
+            if [ -t 0 ]; then
+                echo -e "  -> ${C_YELLOW}Honcho is third-party (plastic-labs, AGPL-3.0).${RESET}"
+                yn=""
+                read -t 120 -rp "  Install & start Honcho now? [y/N] " yn || true
+                [[ "$yn" =~ ^[Yy]$ ]] && HONCHO_WANT="yes" || HONCHO_WANT="no"
+            else
+                HONCHO_WANT="warned"
+                step_warn "Honcho skipped" "not a terminal; set HONCHO_INSTALL=yes"
+            fi
+        fi
 
-                # Clone into a temp dir and merge, so a pre-existing ~/.honcho
-                # (the honcho CLI keeps its config.json there) can't make a
-                # plain `git clone <dir>` fail on "destination not empty".
-                if [ ! -d "$HONCHO_DIR/.git" ]; then
-                    HONCHO_TMP="$(mktemp -d)"
-                    if GIT_TERMINAL_PROMPT=0 timeout 300 git clone --depth 1 "$HONCHO_REPO" \
-                            "$HONCHO_TMP/honcho" </dev/null >>"$HONCHO_LOG" 2>&1; then
-                        mkdir -p "$HONCHO_DIR"
-                        cp -a "$HONCHO_TMP/honcho/." "$HONCHO_DIR/"
-                        printf "  -> Honcho cloned to ~/.honcho/src %-13s ${C_GREEN}[ OK ]${RESET}\n" ""
+        if [ "$HONCHO_WANT" != "yes" ]; then
+            [ "$HONCHO_WANT" = "no" ] && echo "  -> Skipped Honcho install"
+        else
+            : > "$HONCHO_LOG"
+            honcho_ok=true
+
+            # Preconditions, cheapest first. A half-finished build that dies on a
+            # full disk 20 minutes in is the worst outcome available. Only trust
+            # df when it gave us a number: an unreadable $HOME must not be read
+            # as "0 KiB free" and silently skip the step.
+            honcho_free_kb="$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2{print $4}')"
+            [[ "$honcho_free_kb" =~ ^[0-9]+$ ]] || honcho_free_kb=""
+            if ! command -v git &>/dev/null; then
+                step_warn "Honcho skipped" "git not installed"
+                honcho_ok=false
+            elif [ -n "$honcho_free_kb" ] && [ "$honcho_free_kb" -lt "$HONCHO_NEED_KB" ]; then
+                step_warn "Honcho skipped" "$(( honcho_free_kb / 1048576 )) GiB free in \$HOME, needs 5"
+                honcho_ok=false
+            fi
+
+            # Already up and answering? Then there is nothing to do. Re-running
+            # the installer must not tear down a healthy stack.
+            honcho_live=false
+            if [ "$honcho_ok" = true ] && command -v curl &>/dev/null && \
+               curl -fsS --max-time 3 "$HONCHO_HEALTH" &>/dev/null; then
+                honcho_live=true
+            fi
+
+            if [ "$honcho_live" = true ] && [ "${HONCHO_REBUILD:-0}" != "1" ]; then
+                printf "  -> Honcho already running %-21s ${C_GREEN}[ OK ]${RESET}\n" ""
+                honcho_ok=false   # nothing further to do; not an error
+            fi
+
+            # Source. Clone into a temp dir and merge: ~/.honcho already holds the
+            # honcho CLI's config.json on some machines, and `git clone` refuses a
+            # non-empty destination. The temp dir is removed on every exit path.
+            if [ "$honcho_ok" = true ] && [ ! -d "$HONCHO_DIR/.git" ]; then
+                HONCHO_TMP="$(mktemp -d)"
+                if GIT_TERMINAL_PROMPT=0 timeout 300 git clone --depth 1 "$HONCHO_REPO" \
+                        "$HONCHO_TMP/honcho" </dev/null >>"$HONCHO_LOG" 2>&1; then
+                    mkdir -p "$HONCHO_DIR" && cp -a "$HONCHO_TMP/honcho/." "$HONCHO_DIR/"
+                    printf "  -> Honcho cloned to ~/${HONCHO_DIR#$HOME/} %-8s ${C_GREEN}[ OK ]${RESET}\n" ""
+                else
+                    step_warn "Honcho clone failed" "see $HONCHO_LOG"
+                    _honcho_why
+                    honcho_ok=false
+                fi
+                rm -rf "$HONCHO_TMP"
+            elif [ "$honcho_ok" = true ]; then
+                # A dirty checkout must not abort the install; --ff-only refuses
+                # rather than merges, and failure here just means "build what's
+                # already on disk", which is a perfectly good outcome.
+                ( cd "$HONCHO_DIR" && GIT_TERMINAL_PROMPT=0 timeout 120 git pull --ff-only \
+                    </dev/null >>"$HONCHO_LOG" 2>&1 ) || true
+            fi
+
+            # Config. Both files are idempotent: never clobber an existing one,
+            # and never append the inference block twice on a re-run.
+            if [ "$honcho_ok" = true ]; then
+                if [ ! -f "$HONCHO_DIR/docker-compose.yml" ]; then
+                    if [ -f "$HONCHO_DIR/docker-compose.yml.example" ]; then
+                        cp "$HONCHO_DIR/docker-compose.yml.example" "$HONCHO_DIR/docker-compose.yml"
                     else
-                        step_warn "Honcho clone failed" "see $HONCHO_LOG"
+                        step_warn "Honcho has no docker-compose.yml" "upstream layout changed?"
                         honcho_ok=false
                     fi
-                    rm -rf "$HONCHO_TMP"
-                else
-                    ( cd "$HONCHO_DIR" && GIT_TERMINAL_PROMPT=0 timeout 120 git pull --ff-only \
-                        </dev/null >>"$HONCHO_LOG" 2>&1 ) || true
                 fi
-
-                if [ "$honcho_ok" = true ] && [ -d "$HONCHO_DIR" ]; then
-                    [ -f "$HONCHO_DIR/docker-compose.yml" ] || cp "$HONCHO_DIR/docker-compose.yml.example" "$HONCHO_DIR/docker-compose.yml" 2>/dev/null
-                    if [ ! -f "$HONCHO_DIR/.env" ] && [ -f "$HONCHO_DIR/.env.template" ]; then
-                        cp "$HONCHO_DIR/.env.template" "$HONCHO_DIR/.env"
-                        {
-                            echo ""
-                            echo "# --- Local inference (added by mercury-dots installer) ---"
-                            echo "LLM_OPENAI_COMPATIBLE_BASE_URL=http://localhost:11434/v1"
-                            echo "LLM_OPENAI_COMPATIBLE_API_KEY=ollama"
-                        } >> "$HONCHO_DIR/.env"
-                    fi
-
-                    echo "  -> Building & starting Honcho stack (first build takes minutes)..."
-                    echo -e "     ${DIM}progress: tail -f $HONCHO_LOG${RESET}"
-                    ( cd "$HONCHO_DIR" && timeout --foreground "$HONCHO_BUILD_TIMEOUT" \
-                        $HONCHO_COMPOSE up -d --build ) </dev/null >>"$HONCHO_LOG" 2>&1
-                    case "$?" in
-                        0)   printf "  -> Honcho stack up %-28s ${C_GREEN}[ OK ]${RESET}\n" "" ;;
-                        124) step_warn "Honcho build timed out after ${HONCHO_BUILD_TIMEOUT}s" "see $HONCHO_LOG" ;;
-                        *)   step_warn "Honcho stack failed to start" "see $HONCHO_LOG" ;;
-                    esac
+            fi
+            if [ "$honcho_ok" = true ]; then
+                [ -f "$HONCHO_DIR/.env" ] || cp "$HONCHO_DIR/.env.template" "$HONCHO_DIR/.env" 2>/dev/null || touch "$HONCHO_DIR/.env"
+                if ! grep -q "^LLM_OPENAI_COMPATIBLE_BASE_URL=" "$HONCHO_DIR/.env" 2>/dev/null; then
+                    {
+                        echo ""
+                        echo "# --- Local inference (added by mercury-dots installer) ---"
+                        echo "LLM_OPENAI_COMPATIBLE_BASE_URL=http://localhost:11434/v1"
+                        echo "LLM_OPENAI_COMPATIBLE_API_KEY=ollama"
+                    } >> "$HONCHO_DIR/.env"
                 fi
-            else
-                echo "  -> Skipped Honcho install"
+            fi
+
+            # Build & start. -p pins the project name: the compose file has no
+            # `name:` key, so it would otherwise be derived from the directory,
+            # and a second project name re-binds 127.0.0.1:5432/:6379 against a
+            # stack an earlier install already started. -k gives a hung build 30
+            # seconds to die politely before SIGKILL.
+            if [ "$honcho_ok" = true ]; then
+                echo "  -> Building & starting Honcho stack (first build takes minutes)..."
+                echo -e "     ${DIM}progress: tail -f $HONCHO_LOG${RESET}"
+                ( cd "$HONCHO_DIR" && timeout -k 30 --foreground "$HONCHO_BUILD_TIMEOUT" \
+                    $HONCHO_COMPOSE -p "$HONCHO_PROJECT" up -d --build ) </dev/null >>"$HONCHO_LOG" 2>&1
+                honcho_rc=$?
+
+                case "$honcho_rc" in
+                    0)
+                        # `up -d` returning 0 only means the containers were
+                        # created. deriver waits on `api: service_healthy`, so a
+                        # broken api leaves a stack that is "up" and useless.
+                        # Wait for the endpoint the healthcheck itself probes.
+                        honcho_healthy=false
+                        if command -v curl &>/dev/null; then
+                            for _ in $(seq 1 30); do
+                                curl -fsS --max-time 3 "$HONCHO_HEALTH" &>/dev/null && { honcho_healthy=true; break; }
+                                sleep 4
+                            done
+                        else
+                            honcho_healthy=true   # can't probe; trust compose
+                        fi
+                        if [ "$honcho_healthy" = true ]; then
+                            printf "  -> Honcho stack up and healthy %-16s ${C_GREEN}[ OK ]${RESET}\n" ""
+                        else
+                            ( cd "$HONCHO_DIR" && timeout 30 $HONCHO_COMPOSE -p "$HONCHO_PROJECT" \
+                                logs --tail 40 ) </dev/null >>"$HONCHO_LOG" 2>&1 || true
+                            step_warn "Honcho started but never became healthy" "see $HONCHO_LOG"
+                            _honcho_why
+                        fi
+                        ;;
+                    124|137)
+                        step_warn "Honcho build timed out after ${HONCHO_BUILD_TIMEOUT}s" "raise HONCHO_BUILD_TIMEOUT"
+                        _honcho_why
+                        ;;
+                    *)
+                        step_warn "Honcho stack failed to start (exit $honcho_rc)" "see $HONCHO_LOG"
+                        _honcho_why
+                        ;;
+                esac
             fi
         fi
     fi
