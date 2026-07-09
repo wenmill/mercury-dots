@@ -37,7 +37,16 @@ PanelWindow {
 
     readonly property int minWinW: 360
     readonly property int minWinH: 240
-    readonly property bool movableNow: moviesItem.windowMovable === true
+
+    // The widget is built asynchronously (see the Loader below), so this is
+    // null for the first moment of the shell's life. Guard every use.
+    readonly property Item moviesItem: moviesLoader.item
+    readonly property bool movableNow: moviesItem !== null && moviesItem.windowMovable === true
+
+    // Preload once the bar has painted, so the first open is instant without
+    // the widget sitting on the startup critical path.
+    property bool preloaded: false
+    Timer { interval: 1500; running: true; onTriggered: moviesWin.preloaded = true }
 
     function layout() {
         return Registry.getLayout("movies", 0, 0, moviesWin.width, moviesWin.height, 1.0);
@@ -65,7 +74,7 @@ PanelWindow {
         // here first. Returns "closed" when it stopped the player. Passthrough
         // (gaming) is excluded: focus belongs to the game then.
         function closePlayer(): string {
-            if (moviesWin.isVisible && !moviesWin.passthrough
+            if (moviesWin.isVisible && !moviesWin.passthrough && moviesItem
                     && moviesItem.currentView === "player") {
                 moviesItem.closePlayer();
                 return "closed";
@@ -79,7 +88,8 @@ PanelWindow {
         }
     }
 
-    onIsVisibleChanged: { if (isVisible && !passthrough) moviesItem.forceActiveFocus(); }
+    // If the loader hasn't finished, Loader.onLoaded takes the focus instead.
+    onIsVisibleChanged: { if (isVisible && !passthrough && moviesItem) moviesItem.forceActiveFocus(); }
 
     // ── Gaming passthrough (toggled by scripts/overlay_passthrough.sh) ──
     // When on, the window stays visible (video keeps playing) but drops its input
@@ -114,7 +124,7 @@ PanelWindow {
 
     // Resize the window to the playing movie's aspect ratio.
     function applyVideoAspect() {
-        if (!movableNow) return;
+        if (!movableNow) return;   // false while moviesItem is null
         if (moviesItem.videoAspect === undefined) return;
         if (moviesItem.playerFullscreen === true) return;
         var a = moviesItem.videoAspect;
@@ -184,9 +194,26 @@ PanelWindow {
         Behavior on opacity { NumberAnimation { duration: 160; easing.type: moviesWin.isVisible ? Easing.OutCubic : Easing.InCubic } }
         Behavior on scale   { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
 
-        MovieWidget {
-            id: moviesItem
+        // MovieWidget is ~8.3k lines of QML. Building it eagerly cost 2.4s of
+        // the shell's startup — measured as the delay before the top bar's
+        // layer surface appeared — because this window is created at launch
+        // even though it is invisible. Build it asynchronously instead: the bar
+        // paints straight away, and a timer starts the widget shortly after so
+        // opening movies is still instant. Every reference to `moviesItem`
+        // below must tolerate it being null until the loader finishes.
+        Loader {
+            id: moviesLoader
             anchors.fill: parent
+            asynchronous: true
+            active: moviesWin.isVisible || moviesWin.preloaded
+            // `source:`, not `sourceComponent: MovieWidget {}` — an inline
+            // component is compiled together with this file, so the 8.3k lines
+            // would still be parsed at startup even though nothing instantiates
+            // them. A URL defers the compile until the loader activates.
+            source: "MovieWidget.qml"
+            // Opening before the preload timer fires activates the loader on
+            // demand; focus has to wait until the item actually exists.
+            onLoaded: if (moviesWin.isVisible && !moviesWin.passthrough) item.forceActiveFocus()
         }
 
         // ── Move / resize handles (only in mpv player mode) ──
