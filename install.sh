@@ -1983,12 +1983,38 @@ OLLAMAEOF
             # and a second project name re-binds 127.0.0.1:5432/:6379 against a
             # stack an earlier install already started. -k gives a hung build 30
             # seconds to die politely before SIGKILL.
+            #
+            # The build streams to the terminal as well as the log. A silent
+            # cursor is indistinguishable from a hang, which is how the original
+            # bug hid for an hour; watching layers arrive tells you at a glance
+            # whether it is working. HONCHO_QUIET=1 restores the log-only form.
+            #
+            # Stream by following the log, NOT by piping the build into tee. A
+            # pipeline only finishes once every writer closes the pipe, so a
+            # single orphaned grandchild that survives SIGTERM would keep the
+            # installer blocked long past HONCHO_BUILD_TIMEOUT — defeating the
+            # timeout this block exists to guarantee, and reintroducing exactly
+            # the hang we are fixing. Following the file leaves the build's exit
+            # status direct, and stdin closed.
             if [ "$honcho_ok" = true ]; then
                 echo "  -> Building & starting Honcho stack (first build takes minutes)..."
-                echo -e "     ${DIM}progress: tail -f $HONCHO_LOG${RESET}"
+                echo -e "     ${DIM}full log: $HONCHO_LOG${RESET}"
+
+                honcho_tail_pid=""
+                if [ "${HONCHO_QUIET:-0}" != "1" ]; then
+                    tail -n +1 -f "$HONCHO_LOG" 2>/dev/null &
+                    honcho_tail_pid=$!
+                fi
+
                 ( cd "$HONCHO_DIR" && timeout -k 30 --foreground "$HONCHO_BUILD_TIMEOUT" \
                     $HONCHO_COMPOSE -p "$HONCHO_PROJECT" up -d --build ) </dev/null >>"$HONCHO_LOG" 2>&1
                 honcho_rc=$?
+
+                if [ -n "$honcho_tail_pid" ]; then
+                    sleep 1                                  # let tail flush the last lines
+                    kill "$honcho_tail_pid" 2>/dev/null || true
+                    wait "$honcho_tail_pid" 2>/dev/null || true
+                fi
 
                 case "$honcho_rc" in
                     0)
@@ -1998,6 +2024,7 @@ OLLAMAEOF
                         # Wait for the endpoint the healthcheck itself probes.
                         honcho_healthy=false
                         if command -v curl &>/dev/null; then
+                            echo -e "     ${DIM}waiting for api /health (up to 120s)...${RESET}"
                             for _ in $(seq 1 30); do
                                 curl -fsS --max-time 3 "$HONCHO_HEALTH" &>/dev/null && { honcho_healthy=true; break; }
                                 sleep 4
