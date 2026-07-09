@@ -90,6 +90,24 @@ WEATHER_CITY_ID=""
 WEATHER_UNIT=""
 FAILED_PKGS=()
 
+# ── Step tracking ─────────────────────────────────────────────────────────────
+# A full run prints thousands of lines; a [WARN] 20 minutes in is gone by the
+# time it finishes. Every non-OK step goes through step_warn/step_fail, which
+# print the same line they always did AND record it for the debug summary that
+# closes the script. Keep the label short — it is the summary entry verbatim.
+INSTALL_WARNS=()
+INSTALL_FAILS=()
+
+# Print "  -> <label>            [TAG]" with the tag right-aligned to col 52.
+_step_line() {   # <label> <colour> <tag>
+    local pad=$(( 46 - ${#1} )); [ "$pad" -lt 1 ] && pad=1
+    printf "  -> %s%*s${2}[%s]${RESET}\n" "$1" "$pad" "" "$3"
+}
+# step_warn <label> [hint]  — degraded, install continues
+step_warn() { _step_line "$1" "$C_YELLOW" "WARN"; INSTALL_WARNS+=("$1${2:+ — $2}"); }
+# step_fail <label> [hint]  — this component is broken and needs a human
+step_fail() { _step_line "$1" "$C_RED"    "FAIL"; INSTALL_FAILS+=("$1${2:+ — $2}"); }
+
 HEADLESS=false
 
 while [[ "$#" -gt 0 ]]; do
@@ -1168,7 +1186,7 @@ else
     echo "  -> Cloning $WALLPAPER_REPO_URL (depth 1)..."
     if git clone --depth 1 "$WALLPAPER_REPO_URL" "$WALLPAPER_REPO_TMP" >/dev/null 2>&1; then
         if [ ! -d "$WALLPAPER_REPO_TMP/images" ]; then
-            printf "  -> Repo layout unexpected (no images/ dir) %-1s ${C_YELLOW}[WARN]${RESET}\n" ""
+            step_warn "Repo layout unexpected (no images/ dir)" "wallpapers not copied"
             echo "  -> Add wallpapers manually to $WALLPAPER_DIR"
         elif [ "$OPT_WALLPAPERS" = true ]; then
             cp "$WALLPAPER_REPO_TMP/images/"*.{jpg,jpeg,png,gif,webp} "$WALLPAPER_DIR/" 2>/dev/null || true
@@ -1183,7 +1201,7 @@ else
         fi
         rm -rf "$(dirname "$WALLPAPER_REPO_TMP")"
     else
-        printf "  -> Could not clone wallpaper repo %-13s ${C_YELLOW}[WARN]${RESET}\n" ""
+        step_warn "Could not clone wallpaper repo" "network?"
         echo "  -> Add wallpapers manually to: $WALLPAPER_DIR"
     fi
 fi
@@ -1469,7 +1487,7 @@ else
         unzip -q -o /tmp/iosevka-pack/Iosevka.zip -d /tmp/iosevka-pack/
         mv /tmp/iosevka-pack/*.ttf "$TARGET_FONTS_DIR/IosevkaNerdFont/" 2>/dev/null || true
     else
-        printf "  -> Iosevka download failed — install ttf-iosevka-nerd manually %-1s ${C_YELLOW}[WARN]${RESET}\n" ""
+        step_warn "Iosevka download failed" "install ttf-iosevka-nerd manually"
     fi
     rm -rf /tmp/iosevka-pack
 fi
@@ -1495,9 +1513,7 @@ if [ -f "$OBS_BUILD" ]; then
     if bash "$OBS_BUILD" >/tmp/obsidian-shell-build.log 2>&1; then
         printf "  -> obsidian-shell built %-24s ${C_GREEN}[ OK ]${RESET}\n" ""
     else
-        printf "  -> obsidian-shell build FAILED %-16s ${C_RED}[FAIL]${RESET}\n" ""
-        echo -e "  -> ${DIM}See /tmp/obsidian-shell-build.log${RESET}"
-        FAILED_PKGS+=("obsidian-shell(build)")
+        step_fail "obsidian-shell build" "see /tmp/obsidian-shell-build.log"
     fi
 fi
 
@@ -1506,9 +1522,7 @@ if [ -f "$PIP_BUILD" ]; then
     if bash "$PIP_BUILD" >/tmp/mpvplugin-build.log 2>&1; then
         printf "  -> pip mpvplugin built %-25s ${C_GREEN}[ OK ]${RESET}\n" ""
     else
-        printf "  -> mpvplugin build FAILED %-21s ${C_RED}[FAIL]${RESET}\n" ""
-        echo -e "  -> ${DIM}See /tmp/mpvplugin-build.log${RESET}"
-        FAILED_PKGS+=("mpvplugin(build)")
+        step_fail "pip mpvplugin build" "see /tmp/mpvplugin-build.log"
     fi
 fi
 
@@ -1519,7 +1533,7 @@ if command -v hyprpm &>/dev/null; then
     if hyprpm enable hyprbars >/dev/null 2>&1; then
         printf "  -> hyprbars enabled (hyprpm) %-19s ${C_GREEN}[ OK ]${RESET}\n" ""
     else
-        printf "  -> hyprbars pending %-28s ${C_YELLOW}[WARN]${RESET}\n" ""
+        step_warn "hyprbars pending" "run hyprpm enable hyprbars inside Hyprland"
         echo -e "  -> ${DIM}Run 'hyprpm update && hyprpm enable hyprbars' inside a Hyprland session${RESET}"
     fi
 fi
@@ -1560,6 +1574,8 @@ if [ "$OPT_CONTAINERS" = true ]; then
 
     # ── Kavita (reading server for the books tab) ──
     KAVITA_QUADLET="$QUADLET_DIR/kavita.container"
+    # Deliberately visible: this is a library the user fills by hand, like
+    # ~/Notes. Only the installer's own machinery dirs are hidden.
     KAVITA_LIBRARY="$HOME/Books"
     mkdir -p "$KAVITA_LIBRARY"
 
@@ -1593,7 +1609,7 @@ EOF
     systemctl --user daemon-reload
     systemctl --user enable --now kavita.service 2>/dev/null \
         && printf "  -> kavita.service enabled %-21s ${C_GREEN}[ OK ]${RESET}\n" "" \
-        || printf "  -> kavita.service pending (first login) %-6s ${C_YELLOW}[WARN]${RESET}\n" ""
+        || step_warn "kavita.service pending" "starts on first graphical login"
     echo "  -> ${C_CYAN}Kavita:${RESET} http://localhost:5000  (library: $KAVITA_LIBRARY)"
 fi
 
@@ -1617,7 +1633,7 @@ if [ "$OPT_VPN" = true ]; then
         echo -e "  -> ${DIM}The movies video CLI is fail-closed: with vpn_enabled=true in"
         echo -e "     config.json, movie/tv/anime traffic refuses to run untunnelled.${RESET}"
     else
-        printf "  -> provisioning/gluetun missing %-16s ${C_YELLOW}[WARN]${RESET}\n" ""
+        step_warn "provisioning/gluetun missing" "VPN quadlet not written"
     fi
 fi
 
@@ -1731,7 +1747,7 @@ EOF
     systemctl --user daemon-reload
     systemctl --user enable --now searxng-ai.service 2>/dev/null \
         && printf "  -> searxng-ai.service enabled %-17s ${C_GREEN}[ OK ]${RESET}\n" "" \
-        || printf "  -> searxng-ai.service pending %-17s ${C_YELLOW}[WARN]${RESET}\n" ""
+        || step_warn "searxng-ai.service pending" "starts on first graphical login"
     echo "  -> ${C_CYAN}JSON query:${RESET} http://localhost:8888/search?q=hello&format=json"
 
     # ── Inference: vLLM-TurboQuant (AMD) or Ollama (everyone else) ──
@@ -1781,7 +1797,7 @@ EOF
         systemctl --user daemon-reload
         systemctl --user enable --now vllm-turboquant.service 2>/dev/null \
             && printf "  -> vllm-turboquant.service enabled %-13s ${C_GREEN}[ OK ]${RESET}\n" "" \
-            || printf "  -> vllm-turboquant.service pending %-12s ${C_YELLOW}[WARN]${RESET}\n" ""
+            || step_warn "vllm-turboquant.service pending" "journalctl --user -fu vllm-turboquant"
         echo -e "  -> ${C_CYAN}OpenAI API:${RESET} http://localhost:8000/v1  (model: ${BOLD}$VLLM_MODEL${RESET})"
         echo -e "  -> ${DIM}First start downloads weights: journalctl --user -fu vllm-turboquant${RESET}"
     else
@@ -1796,39 +1812,72 @@ OLLAMAEOF
             sudo systemctl daemon-reload
             sudo systemctl enable --now ollama 2>/dev/null \
                 && printf "  -> ollama.service running (localhost only) %-4s ${C_GREEN}[ OK ]${RESET}\n" "" \
-                || printf "  -> ollama.service failed %-22s ${C_YELLOW}[WARN]${RESET}\n" ""
+                || step_warn "ollama.service failed to start"
             echo -e "  -> ${C_CYAN}Pull a model with:${RESET} ${BOLD}ollama pull qwen2.5:7b${RESET}"
         else
-            printf "  -> ollama not installed (variant: $OLLAMA_PKG) %-3s ${C_YELLOW}[WARN]${RESET}\n" ""
+            step_warn "ollama not installed" "variant: $OLLAMA_PKG"
         fi
     fi
 
     # ── Honcho (cross-session memory for Hermes) — interactive, third-party ──
+    #
+    # Every command here runs with stdin closed and under a timeout. Both matter:
+    # this step used to hang forever because its output went to /dev/null while
+    # its stdin stayed on the terminal, so when podman asked "? Please select an
+    # image:" (short-name resolution) or git asked for credentials, the prompt
+    # was discarded and the read blocked for as long as you let it. </dev/null
+    # turns those into an immediate error; the timeout catches a genuinely stuck
+    # build. Output goes to a log we name, not to a black hole.
     if [ "$HEADLESS" != "true" ]; then
         echo -e "\n${C_CYAN}[ INFO ]${RESET} Honcho (cross-session memory for Hermes)..."
-        HONCHO_DIR="$HOME/honcho"
+        HONCHO_DIR="$HOME/.honcho/src"
         HONCHO_REPO="https://github.com/plastic-labs/honcho.git"
+        HONCHO_LOG="/tmp/honcho-install.log"
+        HONCHO_BUILD_TIMEOUT="${HONCHO_BUILD_TIMEOUT:-1800}"   # 30 min, then give up
 
+        # podman first — this desktop is rootless-podman by design. Only accept
+        # docker if its daemon actually answers; the compose plugin reports a
+        # version happily with no daemon behind it, and every later call blocks.
         HONCHO_COMPOSE=""
-        if command -v docker &>/dev/null && docker compose version &>/dev/null; then
-            HONCHO_COMPOSE="docker compose"
-        elif command -v podman-compose &>/dev/null; then
+        if command -v podman-compose &>/dev/null; then
             HONCHO_COMPOSE="podman-compose"
+            systemctl --user start podman.socket >/dev/null 2>&1 || true
+        elif command -v podman &>/dev/null && podman compose version &>/dev/null </dev/null; then
+            HONCHO_COMPOSE="podman compose"
+        elif command -v docker &>/dev/null && timeout 10 docker info &>/dev/null </dev/null; then
+            HONCHO_COMPOSE="docker compose"
         fi
 
         if [ -z "$HONCHO_COMPOSE" ]; then
-            printf "  -> Honcho needs docker/podman compose %-8s ${C_YELLOW}[WARN]${RESET}\n" ""
+            step_warn "Honcho skipped" "needs podman-compose (or a running docker)"
         else
             echo -e "  -> ${C_YELLOW}Honcho is third-party (plastic-labs, AGPL-3.0).${RESET}"
             read -rp "  Install & start Honcho now? [y/N] " yn
             if [[ "$yn" =~ ^[Yy]$ ]]; then
+                : > "$HONCHO_LOG"
+                honcho_ok=true
+
+                # Clone into a temp dir and merge, so a pre-existing ~/.honcho
+                # (the honcho CLI keeps its config.json there) can't make a
+                # plain `git clone <dir>` fail on "destination not empty".
                 if [ ! -d "$HONCHO_DIR/.git" ]; then
-                    git clone --depth 1 "$HONCHO_REPO" "$HONCHO_DIR" >/dev/null 2>&1 \
-                        && printf "  -> Honcho cloned to ~/honcho %-18s ${C_GREEN}[ OK ]${RESET}\n" ""
+                    HONCHO_TMP="$(mktemp -d)"
+                    if GIT_TERMINAL_PROMPT=0 timeout 300 git clone --depth 1 "$HONCHO_REPO" \
+                            "$HONCHO_TMP/honcho" </dev/null >>"$HONCHO_LOG" 2>&1; then
+                        mkdir -p "$HONCHO_DIR"
+                        cp -a "$HONCHO_TMP/honcho/." "$HONCHO_DIR/"
+                        printf "  -> Honcho cloned to ~/.honcho/src %-13s ${C_GREEN}[ OK ]${RESET}\n" ""
+                    else
+                        step_warn "Honcho clone failed" "see $HONCHO_LOG"
+                        honcho_ok=false
+                    fi
+                    rm -rf "$HONCHO_TMP"
                 else
-                    ( cd "$HONCHO_DIR" && git pull --ff-only >/dev/null 2>&1 ) || true
+                    ( cd "$HONCHO_DIR" && GIT_TERMINAL_PROMPT=0 timeout 120 git pull --ff-only \
+                        </dev/null >>"$HONCHO_LOG" 2>&1 ) || true
                 fi
-                if [ -d "$HONCHO_DIR" ]; then
+
+                if [ "$honcho_ok" = true ] && [ -d "$HONCHO_DIR" ]; then
                     [ -f "$HONCHO_DIR/docker-compose.yml" ] || cp "$HONCHO_DIR/docker-compose.yml.example" "$HONCHO_DIR/docker-compose.yml" 2>/dev/null
                     if [ ! -f "$HONCHO_DIR/.env" ] && [ -f "$HONCHO_DIR/.env.template" ]; then
                         cp "$HONCHO_DIR/.env.template" "$HONCHO_DIR/.env"
@@ -1839,10 +1888,16 @@ OLLAMAEOF
                             echo "LLM_OPENAI_COMPATIBLE_API_KEY=ollama"
                         } >> "$HONCHO_DIR/.env"
                     fi
+
                     echo "  -> Building & starting Honcho stack (first build takes minutes)..."
-                    ( cd "$HONCHO_DIR" && $HONCHO_COMPOSE up -d --build ) >/dev/null 2>&1 \
-                        && printf "  -> Honcho stack up %-28s ${C_GREEN}[ OK ]${RESET}\n" "" \
-                        || printf "  -> Honcho stack failed to start %-15s ${C_YELLOW}[WARN]${RESET}\n" ""
+                    echo -e "     ${DIM}progress: tail -f $HONCHO_LOG${RESET}"
+                    ( cd "$HONCHO_DIR" && timeout --foreground "$HONCHO_BUILD_TIMEOUT" \
+                        $HONCHO_COMPOSE up -d --build ) </dev/null >>"$HONCHO_LOG" 2>&1
+                    case "$?" in
+                        0)   printf "  -> Honcho stack up %-28s ${C_GREEN}[ OK ]${RESET}\n" "" ;;
+                        124) step_warn "Honcho build timed out after ${HONCHO_BUILD_TIMEOUT}s" "see $HONCHO_LOG" ;;
+                        *)   step_warn "Honcho stack failed to start" "see $HONCHO_LOG" ;;
+                    esac
                 fi
             else
                 echo "  -> Skipped Honcho install"
@@ -1868,13 +1923,13 @@ if [ "$OPT_HERMES" = true ]; then
             if [[ "$yn" =~ ^[Yy]$ ]]; then
                 curl -fsSL "$HERMES_INSTALL_URL" | sudo bash -s -- --skip-setup \
                     && printf "  -> Hermes installed %-27s ${C_GREEN}[ OK ]${RESET}\n" "" \
-                    || printf "  -> Hermes install failed %-22s ${C_YELLOW}[WARN]${RESET}\n" ""
+                    || step_warn "Hermes agent install failed"
             fi
         fi
     fi
 
     if [ ! -d "$PROV" ]; then
-        printf "  -> provisioning/hermes missing — skipping %-5s ${C_YELLOW}[WARN]${RESET}\n" ""
+        step_warn "provisioning/hermes missing" "gateway not provisioned"
     else
         gen() { openssl rand -hex "${1:-24}" 2>/dev/null || head -c "${1:-24}" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
         API_KEY="$(gen 24)"          # gateway API key == widget hermes_token
@@ -1927,7 +1982,7 @@ if [ "$OPT_ACCOUNTS" = true ]; then
         done
         bash "$ACCT" || echo -e "  -> ${C_YELLOW}Account provisioning had issues — re-run: $ACCT${RESET}"
     else
-        printf "  -> provision-accounts.sh missing — skipping %-3s ${C_YELLOW}[WARN]${RESET}\n" ""
+        step_warn "provision-accounts.sh missing" "app accounts not created"
     fi
 fi
 
@@ -1961,7 +2016,7 @@ if [[ "$SETUP_SDDM_THEME" == true ]]; then
         if sudo git clone --depth 1 -b master "$THEME_REPO" "$THEME_DIR" 2>&1 | tail -2; then
             printf "  -> Astronaut theme cloned %-21s ${C_GREEN}[ OK ]${RESET}\n" ""
         else
-            printf "  -> Astronaut clone failed %-21s ${C_YELLOW}[WARN]${RESET}\n" ""
+            step_warn "SDDM Astronaut theme clone failed"
         fi
     fi
 
@@ -2072,13 +2127,8 @@ cat << "EOF"
 EOF
 echo -e "${RESET}\n"
 
-if [ ${#FAILED_PKGS[@]} -ne 0 ]; then
-    echo -e "${BOLD}${C_RED}The following items failed — fix manually:${RESET}"
-    for fp in "${FAILED_PKGS[@]}"; do
-        echo -e "  - ${C_YELLOW}$fp${RESET}"
-    done
-    echo ""
-fi
+# (Packages, failed steps and warnings are all reported in the debug summary
+#  that closes this script — see the bottom of the file.)
 
 if [ "$OPT_AI" = true ]; then
     echo -e "${BOLD}AI Stack Summary:${RESET}"
@@ -2120,3 +2170,35 @@ if [ "$OPT_STREAMING" = true ]; then
     echo -e "  5. ${C_GREEN}sudo tailscale up${RESET} to join your tailnet (Apollo web UI on :47990)"
 fi
 echo -e "  6. ${C_GREEN}sudo reboot${RESET} if you enabled SDDM"
+
+# ==============================================================================
+# Debug summary — the last thing on screen, so a failure 40 minutes and 10,000
+# lines ago is still the thing you read. Packages that wouldn't install, steps
+# that failed outright, and steps that degraded but let the install continue.
+# ==============================================================================
+_n_pkgs=${#FAILED_PKGS[@]}
+_n_fail=${#INSTALL_FAILS[@]}
+_n_warn=${#INSTALL_WARNS[@]}
+
+echo -e "\n${BOLD}────────────────────────── Debug summary ──────────────────────────${RESET}"
+if [ $(( _n_pkgs + _n_fail + _n_warn )) -eq 0 ]; then
+    echo -e "  ${C_GREEN}${BOLD}✔ Everything completed — no failures, no warnings.${RESET}"
+else
+    if [ "$_n_pkgs" -ne 0 ]; then
+        echo -e "\n  ${C_RED}${BOLD}Packages that failed to install ($_n_pkgs):${RESET}"
+        for fp in "${FAILED_PKGS[@]}"; do echo -e "    ${C_RED}✘${RESET} $fp"; done
+        echo -e "    ${DIM}Retry: paru -S <pkg>   (or re-run this installer)${RESET}"
+    fi
+    if [ "$_n_fail" -ne 0 ]; then
+        echo -e "\n  ${C_RED}${BOLD}Steps that failed ($_n_fail):${RESET}"
+        for f in "${INSTALL_FAILS[@]}"; do echo -e "    ${C_RED}✘${RESET} $f"; done
+    fi
+    if [ "$_n_warn" -ne 0 ]; then
+        echo -e "\n  ${C_YELLOW}${BOLD}Steps that need attention ($_n_warn):${RESET}"
+        for w in "${INSTALL_WARNS[@]}"; do echo -e "    ${C_YELLOW}!${RESET} $w"; done
+    fi
+    echo -e "\n  ${DIM}The desktop itself (Hyprland, Quickshell, widgets) is installed"
+    echo -e "  regardless of the above. Re-running this installer retries the"
+    echo -e "  failed steps and leaves the working ones alone.${RESET}"
+fi
+echo -e "${BOLD}───────────────────────────────────────────────────────────────────${RESET}"

@@ -18,8 +18,8 @@ Tunables (env): AUDIOBOOK_VOICE (built-in voice, default Ryan), AUDIOBOOK_NIGHT_
 import glob, io, json, mimetypes, os, sys, time, urllib.request
 
 ALEX = os.environ.get("ALEXANDRIA_URL", "http://127.0.0.1:4200").rstrip("/")
-BOOKS = os.path.expanduser("~/Books")
-OUT = os.path.expanduser("~/Books/Audiobooks")
+BOOKS = os.environ.get("KAVITA_LIBRARY", os.path.expanduser("~/Books"))
+OUT = os.path.join(BOOKS, "Audiobooks")
 VOICE = os.environ.get("AUDIOBOOK_VOICE", "Ryan")
 NIGHT_START = int(os.environ.get("AUDIOBOOK_NIGHT_START", "1"))
 NIGHT_END = int(os.environ.get("AUDIOBOOK_NIGHT_END", "8"))
