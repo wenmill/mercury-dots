@@ -654,9 +654,20 @@ Variants {
             // ─────────────────────────────────────────────
             // Direct pgrep, no bash wrapper (halves the 24/7 fork rate of this poll);
             // detection rides the exit code: 0 = found, 1 = none.
+            //
+            // screenshot.sh records with gpu-screen-recorder, never wl-screenrec
+            // (which was never even installed), so this indicator could never
+            // light. The truncated name is deliberate: -x matches /proc/comm,
+            // which the kernel caps at 15 characters, and "gpu-screen-recorder"
+            // is 19 — the full name matches nothing and pgrep warns about it.
+            //
+            // Matching comm rather than `-f` on the command line is what keeps
+            // this honest: `-f gpu-screen-recorder` also matches any process
+            // that merely mentions the name (a grep, a tail, an editor), which
+            // would light a "you are being recorded" dot when nothing is.
             Process {
                 id: recPoller
-                command: ["pgrep", "-x", "wl-screenrec"]
+                command: ["pgrep", "-x", "gpu-screen-reco"]
                 onExited: (exitCode) => { barWindow.isRecording = (exitCode === 0); }
             }
             Timer {

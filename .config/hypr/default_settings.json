@@ -532,6 +532,9 @@
       "command": "~/.config/hypr/scripts/hyprpm_ensure.sh"
     },
     {
+      "command": "~/.config/hypr/scripts/keyring_init.sh"
+    },
+    {
       "command": "fcitx5 -d --replace"
     },
     {

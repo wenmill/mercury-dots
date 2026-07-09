@@ -255,7 +255,9 @@ ARCH_PKGS=(
     "quickshell-git" "matugen-bin" "swayosd-git" "awww"
     # Streaming backends for the movies widget's video CLI: lobster (movies/TV)
     # + ani-cli (anime). Torrentio (addon + debrid) needs no package.
-    "wl-screenrec" "gpu-screen-recorder" "ani-cli" "lobster-git"
+    # (No wl-screenrec: screenshot.sh records with gpu-screen-recorder, and
+    #  nothing else ever invoked it. It was only ever the name TopBar polled.)
+    "gpu-screen-recorder" "ani-cli" "lobster-git"
 )
 
 PKGS=("${ARCH_PKGS[@]}")
@@ -2159,10 +2161,30 @@ if [ "$OPT_HERMES" = true ]; then
         } > "$HOME/.hermes/.env"
         chmod 600 "$HOME/.hermes/.env"
 
-        # 4) widgets authenticate with the SAME key — store it in the keyring
-        if command -v secret-tool >/dev/null 2>&1; then
-            printf '%s' "$API_KEY" | secret-tool store --label="qs:hermes_token" service qs-hypr key hermes_token 2>/dev/null \
-                && printf "  -> hermes_token stored in keyring %-13s ${C_GREEN}[ OK ]${RESET}\n" ""
+        # 4) widgets authenticate with the SAME key — store it in the keyring.
+        #
+        # Only if a Secret Service is actually answering. With no wallet yet,
+        # `secret-tool store` blocks on a graphical wallet-creation prompt that a
+        # TTY install can never answer — the same invisible hang as Honcho — and
+        # when it merely fails it used to print nothing at all, so a keyring with
+        # zero secrets in it looked like a successful install. Probe first, with
+        # stdin closed and a timeout; when there is no service, say so and let
+        # scripts/keyring_init.sh finish the job at first graphical login. The
+        # key is never lost: it is already in ~/.hermes/.env, which is where
+        # keyring_init.sh reads it from.
+        # A `lookup` cannot tell a working service from a missing one — both exit
+        # 1 — so the store attempt is the probe. PIPESTATUS[1], not $?, because
+        # $? here belongs to the printf feeding it.
+        if ! command -v secret-tool >/dev/null 2>&1; then
+            step_warn "hermes_token not stored" "libsecret (secret-tool) missing"
+        else
+            printf '%s' "$API_KEY" | timeout 10 secret-tool store --label="qs:hermes_token" \
+                service qs-hypr key hermes_token >/dev/null 2>&1
+            case "${PIPESTATUS[1]}" in
+                0)   printf "  -> hermes_token stored in keyring %-13s ${C_GREEN}[ OK ]${RESET}\n" "" ;;
+                124) step_warn "hermes_token deferred" "keyring prompt needs a desktop; stored at first login" ;;
+                *)   step_warn "hermes_token deferred" "no keyring yet; stored at first login" ;;
+            esac
         fi
 
         systemctl --user daemon-reload 2>/dev/null || true
