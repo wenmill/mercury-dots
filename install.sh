@@ -1556,15 +1556,23 @@ if [ -f "$PIP_BUILD" ]; then
     fi
 fi
 
-# hyprbars plugin via hyprpm (float-mode title bars)
+# hyprbars plugin via hyprpm (float-mode title bars).
+#
+# `hyprpm enable` needs a live Hyprland instance to load the plugin into, so this
+# can only ever succeed when the installer is run from inside a session — from a
+# TTY it always fails. Rather than warn and leave the user to remember a command,
+# scripts/hyprpm_ensure.sh runs from autostart and finishes the job at first
+# graphical login. Everything here is best-effort; stdin closed and timed out,
+# because `hyprpm add` compiles against Hyprland's headers and can take minutes.
 if command -v hyprpm &>/dev/null; then
-    hyprpm update >/dev/null 2>&1 || true
-    hyprpm list 2>/dev/null | grep -q hyprbars || hyprpm add https://github.com/hyprwm/hyprland-plugins >/dev/null 2>&1 || true
-    if hyprpm enable hyprbars >/dev/null 2>&1; then
+    timeout 900 hyprpm update </dev/null >/dev/null 2>&1 || true
+    hyprpm list 2>/dev/null | grep -q hyprbars || \
+        timeout 900 hyprpm add https://github.com/hyprwm/hyprland-plugins </dev/null >/dev/null 2>&1 || true
+    if timeout 120 hyprpm enable hyprbars </dev/null >/dev/null 2>&1; then
         printf "  -> hyprbars enabled (hyprpm) %-19s ${C_GREEN}[ OK ]${RESET}\n" ""
     else
-        step_warn "hyprbars pending" "run hyprpm enable hyprbars inside Hyprland"
-        echo -e "  -> ${DIM}Run 'hyprpm update && hyprpm enable hyprbars' inside a Hyprland session${RESET}"
+        printf "  -> hyprbars deferred to first login %-12s ${C_GREEN}[ OK ]${RESET}\n" ""
+        echo -e "  -> ${DIM}hyprpm needs a running Hyprland; hyprpm_ensure.sh enables it at login${RESET}"
     fi
 fi
 
@@ -1582,7 +1590,9 @@ printf "  -> Bluetooth enabled %-29s ${C_GREEN}[ OK ]${RESET}\n" ""
 sudo systemctl enable --now swayosd-libinput-backend.service 2>/dev/null || true
 printf "  -> SwayOSD libinput backend enabled %-12s ${C_GREEN}[ OK ]${RESET}\n" ""
 sudo systemctl --global enable pipewire wireplumber pipewire-pulse 2>/dev/null || true
-systemctl --user enable easyeffects.service 2>/dev/null || true
+# (No easyeffects.service enable: the package stopped shipping a user unit, so
+#  the call was a silent no-op. EasyEffects is launched from its own autostart
+#  entry when the user wants it; nothing in this DE depends on it running.)
 
 # ==============================================================================
 # Containers (podman) — socket, lingering, Kavita quadlet, gluetun VPN
@@ -1596,6 +1606,14 @@ if [ "$OPT_CONTAINERS" = true ]; then
 
     systemctl --user enable podman.socket >/dev/null 2>&1 && \
         printf "  -> podman user socket enabled %-17s ${C_GREEN}[ OK ]${RESET}\n" ""
+
+    # A compose file's `restart: unless-stopped` does nothing on podman by
+    # itself — there is no daemon to act on it. podman-restart.service is what
+    # brings those containers back after a reboot, and it ships disabled. Without
+    # this, the Honcho stack comes up once at install time and is found "exited"
+    # on every subsequent boot.
+    systemctl --user enable podman-restart.service >/dev/null 2>&1 && \
+        printf "  -> podman-restart enabled (survives reboot) %-3s ${C_GREEN}[ OK ]${RESET}\n" ""
 
     # User lingering — user services persist across login/logout
     if ! loginctl show-user "$USER" 2>/dev/null | grep -q "Linger=yes"; then
@@ -2148,9 +2166,18 @@ if [ "$OPT_HERMES" = true ]; then
         fi
 
         systemctl --user daemon-reload 2>/dev/null || true
-        systemctl --user enable autobrowse.service hermes-gateway.service >/dev/null 2>&1 || true
-        printf "  -> Hermes gateway + autobrowse provisioned %-4s ${C_GREEN}[ OK ]${RESET}\n" ""
-        echo -e "  -> ${DIM}Fresh secrets minted; services start on next login.${RESET}"
+        # Enable hermes-gateway on its own. autobrowse is a podman quadlet, so
+        # systemd *generates* its unit and refuses to enable it ("transient or
+        # generated") — and `systemctl enable A B` aborts the whole invocation
+        # when one unit fails, which left hermes-gateway disabled on every
+        # install while this line still printed [ OK ]. The quadlet already
+        # carries its own [Install] WantedBy, so it needs no enable here.
+        if systemctl --user enable hermes-gateway.service >/dev/null 2>&1; then
+            printf "  -> Hermes gateway + autobrowse provisioned %-4s ${C_GREEN}[ OK ]${RESET}\n" ""
+            echo -e "  -> ${DIM}Fresh secrets minted; services start on next login.${RESET}"
+        else
+            step_warn "hermes-gateway not enabled" "systemctl --user enable hermes-gateway"
+        fi
     fi
 fi
 

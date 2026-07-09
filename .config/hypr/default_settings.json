@@ -529,7 +529,7 @@
   ],
   "startup": [
     {
-      "command": "hyprpm reload"
+      "command": "~/.config/hypr/scripts/hyprpm_ensure.sh"
     },
     {
       "command": "fcitx5 -d --replace"
