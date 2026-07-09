@@ -4,15 +4,15 @@
 # Interactive `browse` uses lobster's native fzf UI in a PiP terminal; headless
 # `play` runs it under the shim (fzf auto-picks, mpv → PiP). lobster exits 0 even
 # on "no results", so play sniffs its output and returns non-zero — letting the
-# dispatcher fall back to the next backend (usually movcli). lobster can't target
-# a specific TV episode headlessly, so it only accepts S1E1 and defers otherwise.
+# dispatcher fall back to the next backend (torrentio). lobster can't target a
+# specific TV episode headlessly, so it only accepts S1E1 and defers otherwise.
 set -uo pipefail
 : "${VIDEO_DIR:=$(cd "$(dirname "$0")/.." && pwd)}"
 source "$VIDEO_DIR/lib/common.sh"
 
 verb="${1:-}"; kind="${2:-}"; shift 2 2>/dev/null || true
 case "$verb" in
-    capabilities) echo "movie tv" ;;
+    capabilities) echo "movie tv download" ;;
     play)
         command -v lobster >/dev/null 2>&1 || { vlog "lobster: not installed"; exit 1; }
         title="${1:?title required}"
@@ -25,6 +25,28 @@ case "$verb" in
         vlog "lobster $kind :: $title"
         vid_run_checked 'no results found|error -|nothing to select|could not' \
             lobster -q "${LOBSTER_QUALITY:-1080}" "$title"
+        ;;
+    download)
+        # lobster downloads natively with -d <path>. Same S1E1-only limit as
+        # `play`: it can't target an episode headlessly, so anything else
+        # defers and the dispatcher falls through to torrentio.
+        command -v lobster >/dev/null 2>&1 || { vlog "lobster: not installed"; exit 1; }
+        title="${1:?title required}"
+        if [ "$kind" = "tv" ]; then
+            season="${2:-1}"; ep="${3:-1}"
+            if [ "$season" != "1" ] || [ "$ep" != "1" ]; then
+                vlog "lobster: can't target S${season}E${ep} headlessly — deferring download"; exit 1
+            fi
+        fi
+        dir="$(vid_download_dir)"
+        vlog "lobster download $kind :: $title -> $dir"
+        vnotify "Downloading: $title"
+        if vid_run_checked 'no results found|error -|nothing to select|could not' \
+              lobster -q "${LOBSTER_QUALITY:-1080}" -d "$dir" "$title"; then
+            vnotify "Downloaded: $title → $dir"
+        else
+            exit 1
+        fi
         ;;
     browse) exec bash "$PIP_DIR/pip_lobster.sh" "$@" ;;
     *) exit 2 ;;

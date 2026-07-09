@@ -23,7 +23,7 @@ for a in "$@"; do
         --referrer=*)           OPTS+=("referrer=${a#*=}") ;;
         --user-agent=*)         OPTS+=("user-agent=${a#*=}") ;;
         --force-media-title=*)  OPTS+=("force-media-title=${a#*=}") ;;
-        --audio-file=*)         OPTS+=("audio-file=${a#*=}") ;;   # mov-cli split audio
+        --audio-file=*)         OPTS+=("audio-file=${a#*=}") ;;   # scraper split audio
         --sub-file=*)           OPTS+=("sub-file=${a#*=}") ;;
         --sub-files=*)          OPTS+=("sub-files=${a#*=}") ;;
         --) ;;                  # arg separator

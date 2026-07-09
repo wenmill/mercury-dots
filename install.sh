@@ -12,7 +12,7 @@
 #   - Dual run modes: repo (deploy configs + provision) / in-place (provision
 #     only, for a machine that already carries the configs)
 #   - Native builds: obsidian-shell (layer-shell + WebEngine), pip mpvplugin,
-#     hyprbars via hyprpm, mov-cli as a uv tool
+#     hyprbars via hyprpm
 #   - Keyring-first secrets: KWallet ksecretd serves org.freedesktop.secrets,
 #     secrets.sh stores every token; config files never hold secret values
 #   - New optional stacks: app containers (podman quadlets), one-password app
@@ -179,6 +179,9 @@ ARCH_PKGS=(
     "wl-clipboard" "cliphist" "libnotify" "brightnessctl" "power-profiles-daemon" "fcitx5"
     # Screenshot / recording / QR
     "grim" "slurp" "satty" "zbar"
+    # Folder chooser for "download to…" (right-click a ⭳ button). kdialog is
+    # preferred when present; zenity is the portable fallback.
+    "zenity"
     # Media pipeline (movies widget video CLI, pip player, wallpapers)
     "mpv" "mpvpaper" "ffmpeg" "yt-dlp" "imagemagick" "poppler"
     # Python + the Element/Matrix overlay host
@@ -192,8 +195,6 @@ ARCH_PKGS=(
     # System-maintenance "update" button in the battery popup:
     #   pacman-contrib -> checkupdates + paccache; arch-audit -> CVE check
     "pacman-contrib" "arch-audit" "bat"
-    # mov-cli provider is installed as a uv tool below
-    "uv"
     # AI stack prerequisites (harmless without the stack)
     "python-pip" "nodejs" "npm" "openssl"
     # Theming
@@ -204,7 +205,9 @@ ARCH_PKGS=(
     "noto-fonts-cjk"
     # AUR
     "quickshell-git" "matugen-bin" "swayosd-git" "awww"
-    "wl-screenrec" "gpu-screen-recorder" "ani-cli"
+    # Streaming backends for the movies widget's video CLI: lobster (movies/TV)
+    # + ani-cli (anime). Torrentio (addon + debrid) needs no package.
+    "wl-screenrec" "gpu-screen-recorder" "ani-cli" "lobster-git"
 )
 
 PKGS=("${ARCH_PKGS[@]}")
@@ -1483,7 +1486,7 @@ fc-cache -f "$TARGET_FONTS_DIR" > /dev/null 2>&1
 printf "  -> Font cache updated %-25s ${C_GREEN}[ OK ]${RESET}\n" ""
 
 # ==============================================================================
-# Native builds — obsidian-shell, pip mpvplugin, hyprbars, mov-cli
+# Native builds — obsidian-shell, pip mpvplugin, hyprbars
 # ==============================================================================
 echo -e "\n${C_CYAN}[ INFO ]${RESET} Building native components..."
 
@@ -1521,12 +1524,8 @@ if command -v hyprpm &>/dev/null; then
     fi
 fi
 
-# mov-cli (movies/tv provider for the video CLI) as a uv tool
-if command -v uv &>/dev/null && ! command -v mov-cli &>/dev/null; then
-    uv tool install mov-cli >/dev/null 2>&1 \
-        && printf "  -> mov-cli installed (uv tool) %-16s ${C_GREEN}[ OK ]${RESET}\n" "" \
-        || printf "  -> mov-cli install failed (optional) %-10s ${C_YELLOW}[WARN]${RESET}\n" ""
-fi
+# (mov-cli retired — upstream deprecated. Movies/TV use lobster, with the
+#  torrentio + debrid backend as the fallback for both movies/TV and anime.)
 
 # --- Core services ---
 echo -e "\n${C_CYAN}[ INFO ]${RESET} Enabling core services..."

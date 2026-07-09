@@ -8,8 +8,9 @@ source "$VIDEO_DIR/lib/common.sh"
 
 verb="${1:-}"; shift 2>/dev/null || true
 case "$verb" in
-    capabilities) echo "play browse" ;;
-    play)    vid_dispatch anime play "$@" ;;   # "$@" = <title> [ep]
+    capabilities) echo "play browse download" ;;
+    play)     vid_dispatch anime play "$@" ;;
+    download) vid_dispatch anime download "$@" ;;   # "$@" = <title> [ep]
     browse)  vid_dispatch anime browse "$@" ;;
     resolve) echo "anime: resolve unsupported (backend resolves internally)" >&2; exit 1 ;;
     *) echo "anime: unknown verb '$verb'" >&2; exit 2 ;;

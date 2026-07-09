@@ -13,7 +13,8 @@ pluggable media backend, and native companion apps.
   notifications, settings, toolhub, character sheet), all timer-gated so the
   idle desktop burns ~0% CPU.
 - **Movies widget with a pluggable `video` CLI** — drop-in provider scripts for
-  YouTube, anime (ani-cli), movies/TV (mov-cli), music (Subsonic/Navidrome) and
+  YouTube, anime (ani-cli), movies/TV (lobster, with a Torrentio+debrid fallback),
+  music (Subsonic/Navidrome) and
   raw URLs, all playing through a native mpv picture-in-picture player
   (`scripts/quickshell/movies/BACKEND.md` documents the whole plane).
 - **Element/Matrix overlay** — transparent Qt WebEngine window themed by

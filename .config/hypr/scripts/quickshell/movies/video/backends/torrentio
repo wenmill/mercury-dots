@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# torrentio backend — movies, TV & anime via the Torrentio Stremio addon + a
+# debrid service (RealDebrid / AllDebrid / Premiumize / TorBox / Offcloud).
+#
+# This is the LAST link in every chain: a safety net for when lobster / ani-cli
+# break (scrapers rot constantly). It never runs while they work.
+#
+# Torrentio resolves a catalog id to a ranked list of sources. With a debrid
+# key in its config path, cached entries carry a direct HTTPS url that the
+# embedded mpv streams straight — no torrent client involved. EVERY request
+# (catalog search, Torrentio lookup, and mpv's media fetch) rides the gluetun
+# proxy exported by vid_vpn_guard, so the whole chain shares one VPN exit —
+# which also keeps the debrid service seeing a single consistent IP.
+#
+# Addressing: movies/TV by IMDb id (Cinemeta), anime by Kitsu id with ABSOLUTE
+# episode numbering — `kitsu:<id>:<ep>`, no season segment.
+#
+# Config (config.json):
+#   torrentio_url      addon base       (default https://torrentio.strem.fun)
+#   torrentio_debrid   provider slug    (realdebrid | alldebrid | premiumize |
+#                                        torbox | offcloud — empty = backend
+#                                        skips itself and the chain cascades)
+#   torrentio_opts     extra addon opts (e.g. "sort=qualitysize|qualityfilter=cam,scr")
+# Secret (keyring — never in the file):
+#   secrets.sh set torrentio_debrid_key <your-debrid-api-key>
+#
+# Without a debrid key Torrentio only yields raw torrent infohashes; a torrent
+# client can't be cleanly forced through gluetun's HTTP proxy, so this backend
+# deliberately refuses magnet-only playback and cascades to the next backend.
+set -uo pipefail
+: "${VIDEO_DIR:=$(cd "$(dirname "$0")/.." && pwd)}"
+source "$VIDEO_DIR/lib/common.sh"
+
+TIO_BASE="$(vid_cfg torrentio_url)"; [ -n "$TIO_BASE" ] || TIO_BASE="https://torrentio.strem.fun"
+TIO_BASE="${TIO_BASE%/}"
+
+tio_config() {   # -> "opts|provider=key" path segment, or "" when not configured
+    local provider key opts cfg=""
+    provider="$(vid_cfg torrentio_debrid)"
+    [ -n "$provider" ] || return 1
+    key="$(vid_secret torrentio_debrid_key)"
+    [ -n "$key" ] || { vlog "torrentio: torrentio_debrid set but no torrentio_debrid_key in keyring"; return 1; }
+    opts="$(vid_cfg torrentio_opts)"
+    [ -n "$opts" ] && cfg="${opts}|"
+    printf '%s' "${cfg}${provider}=${key}" | jq -sRr @uri
+}
+
+imdb_lookup() {   # <movie|series> <title> -> ttXXXX (Cinemeta search, first hit)
+    local type="$1" title="$2" q
+    q="$(printf '%s' "$title" | jq -sRr @uri)"
+    curl -fsS -m 15 "https://v3-cinemeta.strem.io/catalog/$type/top/search=$q.json" 2>/dev/null \
+        | jq -r '[.metas[]? | select(.id | startswith("tt"))][0].id // empty'
+}
+
+kitsu_lookup() {   # <title> -> kitsu:NNNN (Kitsu addon search, first hit)
+    local title="$1" q
+    q="$(printf '%s' "$title" | jq -sRr @uri)"
+    curl -fsS -m 15 "https://anime-kitsu.strem.fun/catalog/anime/kitsu-anime-list/search=$q.json" 2>/dev/null \
+        | jq -r '[.metas[]? | select(.id | startswith("kitsu:"))][0].id // empty'
+}
+
+verb="${1:-}"; kind="${2:-}"; shift 2 2>/dev/null || true
+case "$verb" in
+    capabilities) echo "movie tv anime download" ;;
+    play|download)
+        title="${1:?title required}"
+
+        CFG="$(tio_config)" || { vlog "torrentio: no debrid configured — skip"; exit 1; }
+
+        if [ "$kind" = "tv" ]; then
+            season="${2:-1}"; ep="${3:-1}"
+            imdb="$(imdb_lookup series "$title")"
+            [ -n "$imdb" ] || { vlog "torrentio: no imdb match for '$title'"; exit 1; }
+            STREAMS_URL="$TIO_BASE/$CFG/stream/series/${imdb}:${season}:${ep}.json"
+            vlog "torrentio tv :: $title ($imdb) s${season}e${ep}"
+        elif [ "$kind" = "anime" ]; then
+            # anime contract: <title> <ep> [sub|dub] [result-idx]. Torrentio
+            # indexes releases, not tracks — sub/dub is whatever the release
+            # carries, so the mode/idx args from ani-cli's path are ignored.
+            ep="${2:-1}"; mode="${3:-sub}"
+            kid="$(kitsu_lookup "$title")"
+            [ -n "$kid" ] || { vlog "torrentio: no kitsu match for '$title'"; exit 1; }
+            # ABSOLUTE episode numbering, no season segment (kitsu:ID:EP).
+            STREAMS_URL="$TIO_BASE/$CFG/stream/series/${kid}:${ep}.json"
+            vlog "torrentio anime :: $title ($kid) e${ep} [${mode} requested; release-dependent]"
+        else
+            imdb="$(imdb_lookup movie "$title")"
+            [ -n "$imdb" ] || { vlog "torrentio: no imdb match for '$title'"; exit 1; }
+            STREAMS_URL="$TIO_BASE/$CFG/stream/movie/${imdb}.json"
+            vlog "torrentio movie :: $title ($imdb)"
+        fi
+
+        streams="$(curl -fsS -m 25 "$STREAMS_URL" 2>/dev/null)" \
+            || { vlog "torrentio: addon unreachable"; exit 1; }
+
+        # Prefer debrid-CACHED entries ([RD+], [AD+], …) — instant playback;
+        # an uncached "[RD download]" entry would block while debrid fetches.
+        pick="$(printf '%s' "$streams" | jq -r '
+            [.streams[]? | select(.url != null and (.url | startswith("http")))] as $all |
+            ([$all[] | select(.name | test("\\[[A-Z]{2,3}\\+\\]"))] | first) // ($all | first) //
+            empty | @json')"
+        [ -n "$pick" ] || {
+            n="$(printf '%s' "$streams" | jq -r '[.streams[]?] | length' 2>/dev/null || echo 0)"
+            vlog "torrentio: $n torrent-only result(s), none debrid-resolvable — cascading"
+            exit 1
+        }
+
+        url="$(printf '%s' "$pick" | jq -r '.url')"
+        label="$(printf '%s' "$pick" | jq -r '(.title // .name // "torrentio") | split("\n")[0]')"
+        vlog "torrentio picked :: $label"
+
+        if [ "$verb" = "download" ]; then
+            # The debrid link is a plain HTTPS file — curl it straight down.
+            # It inherits http_proxy/https_proxy from vid_vpn_guard, so the
+            # transfer rides the same tunnel as everything else.
+            dir="$(vid_download_dir)"
+            case "$kind" in
+                tv)    out="${title} S$(printf '%02d' "${season:-1}")E$(printf '%02d' "${ep:-1}")" ;;
+                anime) out="${title} E$(printf '%02d' "${ep:-1}")" ;;
+                *)     out="${title}" ;;
+            esac
+            out="$(printf '%s' "$out" | tr '/' '_')"
+            ext="${url##*.}"; case "$ext" in mkv|mp4|avi|webm) ;; *) ext="mkv" ;; esac
+            dest="$dir/${out}.${ext}"
+            vlog "torrentio download :: $label -> $dest"
+            vnotify "Downloading: $out"
+            if curl -fL --retry 2 -m 7200 -o "$dest.part" "$url"; then
+                mv -f "$dest.part" "$dest"
+                vnotify "Downloaded: $out → $dir"
+            else
+                rm -f "$dest.part"
+                vlog "torrentio: download failed"
+                exit 1
+            fi
+            exit 0
+        fi
+
+        vid_load "$url" "--force-media-title=${title}"
+        ;;
+    browse) exit 2 ;;   # no interactive mode — Torrentio is resolve-and-play
+    *) exit 2 ;;
+esac

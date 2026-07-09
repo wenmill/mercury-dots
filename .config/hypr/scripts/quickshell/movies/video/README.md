@@ -3,7 +3,7 @@
 One command for every video operation the widget performs, backed by **pluggable
 providers** so adding a new source is a drop-in file — no QML changes. The
 QML widget (`../MovieWidget.qml`) calls **only** `video`; it never invokes
-mov-cli / ani-cli / yt-dlp / mpv directly.
+lobster / ani-cli / yt-dlp / mpv directly.
 
 ```
 movies/video/
@@ -62,27 +62,30 @@ Providers `source ../lib/common.sh` and get the transport helpers for free:
 ## Movie / TV / anime backends — add your own source
 
 The `movie` / `tv` / `anime` providers are thin: they **dispatch to a pluggable
-backend** in [`backends/`](backends/README.md) (mov-cli, lobster, ani-cli, or your
-own — e.g. Jellyfin). Pick one per kind in `~/.config/hypr/config.json`:
+backend** in [`backends/`](backends/README.md) (lobster, ani-cli, torrentio,
+or your own — e.g. Jellyfin). Pick one per kind in
+`~/.config/hypr/config.json`:
 
 ```jsonc
 "movie_backend": "lobster",   // "tv_backend", "anime_backend" — unset = defaults
 ```
 
 Each kind has a **fallback chain** (config first, then defaults: movie/tv =
-`lobster → movcli`, anime = `anicli`), so a dead source cascades to the next. Add
-a new source by dropping one file in `backends/` — see **`backends/README.md`**
-and the ready-to-copy **`backends/jellyfin.example`**.
+`lobster → torrentio`, anime = `anicli → torrentio`), so a dead source
+cascades to the next. The scrapers lead; `torrentio` (Stremio addon + debrid)
+is the last-resort safety net for when they rot, and self-skips unless a debrid
+account is configured. Add a new source by dropping one file in `backends/` —
+see **`backends/README.md`** and the ready-to-copy **`backends/jellyfin.example`**.
 
 Notes: lobster's fzf uses `--expect`, so `../../pip/auto_fzf.sh` emits a blank key
-line when `--expect` is present (mov-cli/ani-cli unaffected). lobster can't target
-an exact TV episode headlessly (defers non-S1E1 → falls through to movcli).
+line when `--expect` is present (ani-cli unaffected). lobster can't target an exact
+TV episode headlessly (defers non-S1E1 → falls through to torrentio, which needs a
+debrid account).
 
 **Resilience:** lobster scrapes `flixhq.to`, whose domain drifts / goes down; the
-chain then falls through. (If every source is dead — flixhq down *and* mov-cli on
-its `test.default` placeholder scraper — nothing plays until one is restored:
-`paru -S lobster-git`, a working flixhq mirror in lobster's
-config `base=`, or a real mov-cli scraper plugin.)
+chain then falls through to torrentio. (If both are dead — flixhq down *and* no
+debrid key — nothing plays until one is restored: `paru -S lobster-git`, a working
+flixhq mirror in lobster's config `base=`, or a debrid key in the keyring.)
 
 ## VPN routing (gluetun) — movie/tv/anime only
 

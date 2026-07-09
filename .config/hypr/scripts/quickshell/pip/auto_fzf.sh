@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Non-interactive `fzf` replacement for headless ani-cli / mov-cli / lobster.
+# Non-interactive `fzf` replacement for headless ani-cli / lobster / lobster.
 #
 # Reads candidate lines on stdin, prints exactly ONE selection, exits. All real
 # fzf CLI flags are ignored EXCEPT `--expect` (see below). Behaviour:
@@ -12,7 +12,7 @@
 # back-button, so it expects fzf to print an EXTRA first line = the key pressed
 # (empty when the user just accepted). When `--expect` is among the args we emit
 # a leading blank line (= "accepted, no special key") so lobster's parser strips
-# it and reads our candidate as the selection. mov-cli / ani-cli never pass
+# it and reads our candidate as the selection. lobster / ani-cli never pass
 # --expect, so their single-line behaviour is unchanged.
 #
 # This lets the CLI resolve a stream link and hand it to the PiP without ever
@@ -31,7 +31,7 @@ low="$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]')"
 case "$low" in
     *next\ episode*|*replay\ episode*|*previous\ episode*|*next\ ep*|*replay\ ep*|*quit*|*exit*)
         # post-play menu → stop the loop. Under --expect (lobster) pick "Exit" so
-        # its continue-prompt ends cleanly; otherwise emit nothing (mov-cli/ani-cli).
+        # its continue-prompt ends cleanly; otherwise emit nothing (lobster/ani-cli).
         [ -n "$expect" ] && printf '\nExit\n'
         exit 0 ;;
 esac

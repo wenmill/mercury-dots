@@ -72,8 +72,8 @@ URL box → `video load <url>`, play/pause → `video ipc …`, pop-out → `vid
 |---|---|
 | `youtube` | `search` → yt-dlp `ytsearch24`; `play` → youtube URL into PiP (mpv `ytdl` hook) |
 | `anime` | `play` → `ani-cli -S 1 -e <ep>` headless; `browse` → interactive ani-cli |
-| `movie` | `play` → `mov-cli -c 1 --player mpv`; `browse` → interactive mov-cli |
-| `tv` | `play` → `mov-cli -c 1 -ep <ep>:<season>` (note: **episode:season** order) |
+| `movie` | `play` → `lobster -q 1080` (→ torrentio fallback); `browse` → interactive lobster |
+| `tv` | `play` → `lobster` (S1E1 only) → `torrentio` for exact episodes |
 | `music` | builds a Subsonic token stream URL from config, loads it into the PiP |
 | `url` | loads an arbitrary direct URL/file (the minimal provider template) |
 
@@ -90,7 +90,7 @@ and is documented in full at [`../pip/BACKEND.md`](../pip/BACKEND.md). In short:
   `keep-open/idle/ytdl=yes`, `hwdec=auto-safe`.
 - `../pip/pip_mpv.sh` writes `loadfile … replace` (plus referrer/header/sub
   options) to that socket — this is what `vid_load` calls.
-- Headless scrapers (mov-cli/ani-cli) run with a **shim** dir first on PATH whose
+- Headless scrapers (lobster/ani-cli) run with a **shim** dir first on PATH whose
   `mpv` → `pip_mpv.sh` and `fzf` → `auto_fzf.sh` (auto-pick), so they load into
   the one PiP and never prompt. `video`'s `vid_run_headless` builds this shim.
 - **Whenever the widget is loaded, a JSON-IPC mpv is listening on the socket** —
@@ -135,9 +135,10 @@ network. See `video/README.md` § "VPN routing" for setup
 
 ## 6. Failure modes
 
-- **Movies/TV won't play / "No source found":** mov-cli's scraper failed —
+- **Movies/TV won't play / "No source found":** lobster's scraper failed —
   ani-cli (anime) is more reliable. Check `$XDG_RUNTIME_DIR/video.log` and
-  `pip_play.log`. mov-cli scrapers are fragile/region-dependent.
+  `$XDG_RUNTIME_DIR/video.log`. Scrapers are fragile/region-dependent; configure
+  the torrentio backend (+ debrid key) as a fallback.
 - **"VPN not connected — blocked (failsafe)":** `vpn_enabled` is on but the
   gluetun tunnel isn't up. `systemctl --user start gluetun` (credentials in
   `~/.config/gluetun/gluetun.env`); check `podman logs gluetun`. To bypass
@@ -163,7 +164,7 @@ movies/
 ├── kavita_fetch.py     comics/manga integration
 └── mal_set_status.py   MyAnimeList integration
 ../pip/                 shared transport: mpvplugin/ · pip_mpv.sh · pip_ipc.sh ·
-                        pip_popout.sh · auto_fzf.sh · pip_anicli.sh · pip_movcli.sh ·
+                        pip_popout.sh · auto_fzf.sh · pip_anicli.sh · pip_lobster.sh ·
                         {yt,trakt,reddit}_comments.sh · ai_parse.sh · BACKEND.md
 ```
 

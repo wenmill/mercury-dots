@@ -45,6 +45,18 @@ vid_secret() {
     vid_cfg "$1"
 }
 
+# Where `video download …` puts files. Precedence:
+#   VID_DOWNLOAD_DIR (env — set by lib/download.sh's folder picker)
+#   config.json "download_dir"
+#   ~/Videos/Mercury
+vid_download_dir() {
+    local d="${VID_DOWNLOAD_DIR:-}"
+    [ -n "$d" ] || d="$(vid_cfg download_dir)"
+    [ -n "$d" ] || d="$HOME/Videos/Mercury"
+    mkdir -p "$d" 2>/dev/null
+    printf '%s' "$d"
+}
+
 # ── VPN routing (gluetun) — movie/tv/anime ONLY ──────────────────────────────
 # When config.json "vpn_enabled" is true, ALL movie/tv/anime source traffic
 # (scraper lookups AND the resolved stream into the PiP) is routed through the
@@ -96,8 +108,8 @@ vid_headless_shim() {
     printf '%s\n' "$shim"
 }
 
-# Run a scraper CLI (mov-cli/ani-cli/…) fully headless. Fire-and-forget friendly.
-#   vid_run_headless mov-cli -c 1 --player mpv "The Matrix"
+# Run a scraper CLI (lobster/ani-cli/…) fully headless. Fire-and-forget friendly.
+#   vid_run_headless lobster -q 1080 "The Matrix"
 vid_run_headless() {
     local shim; shim="$(vid_headless_shim)"
     PATH="$shim:$PATH" "$@" </dev/null >>"$VIDEO_LOG" 2>&1
@@ -105,7 +117,7 @@ vid_run_headless() {
 
 # Run a scraper CLI headless under the shim, CAPTURING its output, and return
 # FAILURE when it printed a "nothing found" marker — many scrapers (lobster,
-# mov-cli, ani-cli) exit 0 even on no results, so a backend that wants the
+# ani-cli) exit 0 even on no results, so a backend that wants the
 # dispatcher to fall through must use this instead of vid_run_headless.
 #   vid_run_checked 'no results|error -' lobster -q 1080 "The Matrix"
 vid_run_checked() {   # <fail-regex> <cmd> [args...]
@@ -119,13 +131,22 @@ vid_run_checked() {   # <fail-regex> <cmd> [args...]
 
 # ── Pluggable backends ────────────────────────────────────────────────────────
 # The movie/tv/anime providers are thin: they DISPATCH to a selectable backend in
-# backends/ (one drop-in file per source — mov-cli, lobster, ani-cli, or your own
+# backends/ (one drop-in file per source — lobster, ani-cli, torrentio, or your own
 # e.g. Jellyfin). Selection per kind via config.json "<kind>_backend"; unset uses
 # the built-in defaults below. See backends/README + backends/jellyfin.example.
 _vid_default_backends() {   # <kind>
+    # Scrapers lead; torrentio is the SAFETY NET at the end of every chain —
+    # it only runs once lobster/anicli have failed (a dead scraper exits
+    # non-zero and vid_dispatch cascades). It also self-skips instantly unless
+    # a debrid provider is configured, so it costs nothing when unused.
+    #
+    # NB: mov-cli was retired (upstream deprecated). It was the only backend
+    # that could target an exact TV episode headlessly — lobster defers
+    # anything but S1E1 — so TV episodes now resolve through torrentio, which
+    # needs a debrid account. Without one, only S1E1 has a movie/tv source.
     case "$1" in
-        movie|tv) echo "lobster movcli" ;;
-        anime)    echo "anicli" ;;
+        movie|tv) echo "lobster torrentio" ;;
+        anime)    echo "anicli torrentio" ;;
         *)        echo "" ;;
     esac
 }
@@ -135,24 +156,37 @@ vid_backend_chain() {   # <kind>
     # shellcheck disable=SC2086
     printf '%s\n' $cfg $(_vid_default_backends "$kind") | awk 'NF && !seen[$0]++'
 }
-# Dispatch a verb (play|browse) for <kind> to the backend chain. `browse` execs
-# the first capable backend (interactive); `play` tries each in order and falls
-# through when a backend exits non-zero, so a dead source cascades to the next.
-vid_dispatch() {   # <kind> <verb:play|browse> [args...]
+# Dispatch a verb (play|browse|download) for <kind> to the backend chain.
+# `browse` execs the first capable backend (interactive); `play`/`download` try
+# each in order and fall through when a backend exits non-zero, so a dead
+# source cascades to the next. `download` additionally skips backends that
+# don't advertise the `download` capability.
+vid_dispatch() {   # <kind> <verb:play|browse|download> [args...]
     local kind="$1" verb="$2"; shift 2
     # VPN failsafe FIRST: for movie/tv/anime with vpn_enabled, refuse to launch
     # any backend unless the gluetun tunnel is verifiably up (see vid_vpn_guard).
+    # Downloads are source traffic too — same guard, same fail-closed rule.
     vid_vpn_guard "$kind" || return 1
-    local b prov tried=0
+    local b prov tried=0 caps
     for b in $(vid_backend_chain "$kind"); do
         prov="$VIDEO_DIR/backends/$b"
         [ -x "$prov" ] || { vlog "backend '$b' missing/not executable — skip"; continue; }
-        "$prov" capabilities 2>/dev/null | tr ' ' '\n' | grep -qx "$kind" || continue
+        caps="$("$prov" capabilities 2>/dev/null)"
+        printf '%s\n' $caps | grep -qx "$kind" || continue
         if [ "$verb" = "browse" ]; then exec "$prov" browse "$kind" "$@"; fi
+        if [ "$verb" = "download" ]; then
+            printf '%s\n' $caps | grep -qx "download" || {
+                vlog "backend '$b' can't download — trying next"; continue; }
+        fi
         tried=1
-        if "$prov" play "$kind" "$@"; then return 0; fi
-        vlog "backend '$b' failed for $kind — trying next"
+        if "$prov" "$verb" "$kind" "$@"; then return 0; fi
+        vlog "backend '$b' failed for $kind ($verb) — trying next"
     done
+    if [ "$verb" = "download" ]; then
+        [ "$tried" = 1 ] && vnotify "download failed for $kind (all backends)" \
+                         || vnotify "no backend can download $kind"
+        return 1
+    fi
     [ "$tried" = 1 ] && vnotify "no working source for $kind (all backends failed)" \
                      || vnotify "no backend available for $kind"
     return 1

@@ -32,7 +32,7 @@ SECRET_KEYS=(
   hermes_token ollama_api_key lichess_token kavita_api_key autobrowse_token
   matrix_homeserver matrix_user matrix_password matrix_token
   screenpipe_token dify_dataset_key dify_app_key apollo_web_user apollo_web_password
-  mal_access_token navidrome_pass
+  mal_access_token navidrome_pass torrentio_debrid_key
 )
 # NOTE: `app_admin_password` (the one shared password for the self-hosted app
 # accounts, set by provisioning/accounts/provision-accounts.sh) is stored in the

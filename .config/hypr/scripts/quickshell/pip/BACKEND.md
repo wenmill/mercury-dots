@@ -1,6 +1,6 @@
-# Movies / TV / Anime playback backend (mov-cli + ani-cli)
+# Movies / TV / Anime playback backend (lobster + ani-cli + torrentio)
 
-How the Quickshell movies widget plays **movies and TV (via mov-cli)** and **anime
+How the Quickshell movies widget plays **movies and TV (via lobster)** and **anime
 (via ani-cli)** into its embedded mpv player, fully headlessly (no terminal, no
 prompts). YouTube and music do **not** use this path (YouTube → `pip_mpv.sh` with a
 `youtube.com/watch?v=` URL; music → Subsonic stream URL → `pip_mpv.sh`).
@@ -19,7 +19,7 @@ QML (MovieWidget.qml)                    one persistent mpv (the PiP)
   pip_play.sh kind title [s] [e]                         ▲
         │  PATH=shim-auto:$PATH   (fake mpv + fzf)        │ JSON IPC: loadfile <url> replace
         ▼                                                 │
-  mov-cli / ani-cli   ──resolves stream──►  calls `mpv <url> …flags…`
+  lobster / ani-cli   ──resolves stream──►  calls `mpv <url> …flags…`
         │  (fzf auto-picks first result)                  │
         ▼                                                 │
   shim `mpv`  ──exec──►  pip_mpv.sh <url> …flags… ────────┘  (writes to the socket)
@@ -94,29 +94,30 @@ Steps:
    It's regenerated every run so the embedded absolute `DIR` path is current.
 
 2. **Prepend the shim to `PATH`** for the CLI invocation only
-   (`PATH="$SHIM:$PATH" mov-cli …`), so the CLI's `mpv`/`fzf` resolve to the shims.
+   (`PATH="$SHIM:$PATH" lobster …`), so the CLI's `mpv`/`fzf` resolve to the shims.
 
 3. **Invoke the CLI non-interactively** with stdin redirected from `/dev/null`,
    stdout/stderr appended to `$XDG_RUNTIME_DIR/pip_play.log`:
 
    | kind  | command |
    |-------|---------|
-   | movie | `mov-cli -c 1 --player mpv "<title>"` |
-   | tv    | `mov-cli -c 1 -ep "<ep>:<season>" --player mpv "<title>"` |
+   | movie | `lobster -q 1080 "<title>"` |
+   | tv    | `lobster` (S1E1) → `torrentio` (exact episodes, needs debrid) |
    | anime | `ani-cli -S 1 -e "<ep>" "<title>"` |
 
-   - `mov-cli -c 1` auto-selects the **first** search result (`-c` = choice).
-   - `mov-cli -ep <ep>:<season>` selects the episode (note order: **episode first**).
+   - lobster is auto-picked through the fzf shim; it can't target an episode
+     headlessly, so anything but S1E1 falls through to torrentio.
    - `ani-cli -S 1` auto-selects the first result; `-e <ep>` the episode.
-   - `--player mpv` makes mov-cli spawn `mpv` (→ the shim).
+   - the shimmed `mpv` receives the resolved stream.
 
 4. The CLI scrapes a provider, resolves a direct stream URL, then "plays" it by
    running `mpv <url> [--referrer=… --http-header-fields=… --force-media-title=… …]`
    — which is the shim → `pip_mpv.sh`.
 
-**mov-cli binary preference:** uses `~/.local/bin/mov-cli` (a `uv tool` install
-with a working scraper + Node runtime) if present, else `mov-cli` on PATH. The
-system mov-cli historically has no usable scraper.
+**mov-cli was retired** (upstream deprecated). Movies/TV use lobster, with the
+torrentio backend (Stremio addon + debrid) as the fallback for movies, TV and
+anime alike. The legacy `pip_play.sh` / `pip_movcli.sh` entry points are gone —
+everything routes through `movies/video/video`.
 
 `notify-send "PiP" "<msg>"` is used for "X is not installed" errors.
 
@@ -130,7 +131,7 @@ pip_mpv.sh [mpv-style flags...] <URL_OR_FILE>
 
 - Parses **mpv-style argv** and keeps only what matters, mapping flags → mpv option
   keys: `--http-header-fields=` , `--referrer=` , `--user-agent=` ,
-  `--force-media-title=` , `--audio-file=` (mov-cli split audio) , `--sub-file=` ,
+  `--force-media-title=` , `--audio-file=` (scraper split audio) , `--sub-file=` ,
   `--sub-files=`. All other `--flags` are ignored. First positional arg = the media.
 - Connects to `$XDG_RUNTIME_DIR/mpv-pip.sock` (retries for ~6 s for the socket to appear).
 - Sends, as JSON lines:
@@ -144,7 +145,7 @@ pip_mpv.sh [mpv-style flags...] <URL_OR_FILE>
 
 This is also how **YouTube** and **music** play — QML calls
 `pip_mpv.sh https://www.youtube.com/watch?v=<id>` or `pip_mpv.sh <subsonic-stream-url>`
-directly (no mov-cli/ani-cli). The embedded mpv's `ytdl=yes` resolves the YouTube URL.
+directly (no lobster/ani-cli). The embedded mpv's `ytdl=yes` resolves the YouTube URL.
 
 ---
 
@@ -175,17 +176,17 @@ the only interactive path; `pip_play.sh` is the headless one the widget uses.
 
 ## 8. Failure modes & notes
 
-- **Nothing plays / "No source found":** mov-cli's scraper failed or returned no
+- **Nothing plays / "No source found":** lobster's scraper failed or returned no
   result. The widget shows `"No source found.\nAnime uses ani-cli (works); movies/TV
-  need a working mov-cli scraper plugin."` Check `$XDG_RUNTIME_DIR/pip_play.log`.
-- **mov-cli scrapers are fragile / region-dependent**; ani-cli is more reliable.
-  The episode-number arg order differs (`mov-cli -ep <ep>:<season>` vs `ani-cli -e <ep>`).
+  need a working source."` Check `$XDG_RUNTIME_DIR/video.log`.
+- **Scrapers are fragile / region-dependent**; ani-cli is the most reliable.
+  Configure torrentio + a debrid key so the chain always has a last resort.
 - **Socket missing:** if the movies widget isn't loaded, the socket doesn't exist;
   `pip_mpv.sh` waits ~6 s then exits silently.
 - **Single PiP:** there is only ever one embedded mpv; every load is `loadfile …
   replace`. There is no per-stream window.
 - **Title for the player UI** comes from the QML side (`selectedTitle`), not the
-  CLI; mov-cli/ani-cli only supply the stream URL + headers.
+  CLI; lobster/ani-cli only supply the stream URL + headers.
 
 ---
 
@@ -207,7 +208,7 @@ the only interactive path; `pip_play.sh` is the headless one the widget uses.
   `pip/pip_mpv.sh <resolved-url> [--headers…]`, and (if it uses fzf/mpv internally
   and must stay headless) run it with `PATH="$PIP/shim-auto:$PATH"` so its `mpv`
   and `fzf` are the shims. Mirror the `pip_play.sh` `case` block.
-- **Swap mov-cli/ani-cli for something else** (e.g. a different scraper): only
+- **Swap lobster/ani-cli for something else** (e.g. a different scraper): only
   `pip_play.sh`'s `case "$KIND"` block needs to change — keep emitting a final
   `mpv <url>` call (which the shim routes to `pip_mpv.sh`), and the rest of the
   stack (socket, QML, comments, up-next) is unaffected.

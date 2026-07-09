@@ -46,7 +46,7 @@ Item {
     readonly property color red: _theme.red || "#f38ba8"
 
     // --- STATE MANAGEMENT ---
-    property string currentView: "search" // "search", "series", "pip", "player"
+    property string currentView: "search" // "search", "series", "movie", "pip", "player"
     property string playerStatus: "" // overlay text shown while the player has no media
 
     // --- EMBEDDED PLAYER STATE (driven by a poll of the mpv item) ---
@@ -881,6 +881,8 @@ Item {
                         window.pendingSeriesFocusRestore = true
                         fetchSeriesData(s.selectedImdbId, s.currentSeason || 1, "", "", true)
                     }
+                    // Movie page: re-fetch its meta so banner/synopsis/cast are live.
+                    if (s.currentView === "movie" && s.selectedImdbId) fetchMovieMeta(s.selectedImdbId)
                     // Now that mediaType is restored, load the section's feed so it's not blank
                     // on open (the onVisibleChanged check can run before this restore completes).
                     if (window.mediaType === "youtube" && window.currentView === "search"
@@ -1022,7 +1024,14 @@ Item {
             else event.accepted = true   // swallow the rest while the gate is up
             return
         }
-        if (window.currentView === "series") {
+        if (window.currentView === "movie") {
+            if (event.key === Qt.Key_Escape) {
+                window.currentView = "search"; searchInput.forceActiveFocus(); saveUiState()
+                event.accepted = true
+            } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                playSelectedMovie(); event.accepted = true
+            }
+        } else if (window.currentView === "series") {
             if (event.key === Qt.Key_Escape) {
                 window.currentView = "search"
                 searchInput.forceActiveFocus()
@@ -2669,8 +2678,9 @@ Item {
     }
 
     // Fire-and-forget background resolver: finds the title/episode and plays it
-    // in the PiP from the start. mov-cli for movies/TV, ani-cli for anime — both
-    // run fully headless (no terminal, no prompts) via the video CLI (video play …).
+    // in the PiP from the start. lobster for movies/TV, ani-cli for anime, with
+    // torrentio as the fallback for both — all fully headless (no terminal, no
+    // prompts) via the video CLI (video play …).
     function playFromStart(kind, title, season, ep) {
         // Self-limit gate for movies/tv/anime: counts the watch, or blocks + locks.
         // Runs synchronously right after the caller's enterPlayer(), so reverting the
@@ -3114,10 +3124,15 @@ Item {
         }
     }
 
-    // Movie synopsis for the player's below-video page (movies play straight
-    // from a card, so nothing else loads their description).
+    // Movie detail fields — the movie page mirrors the series page.
+    property string selectedYear: ""
+    property string selectedGenres: ""
+    property real   selectedRating: 0
+    property string selectedRuntime: ""
+    property string selectedCast: ""
+
+    // Movie metadata: fills the movie page AND the player's below-video panel.
     function fetchMovieMeta(imdbId) {
-        window.selectedDescription = ""
         if (!imdbId) return
         var xhr = new XMLHttpRequest()
         xhr.open("GET", "https://v3-cinemeta.strem.io/meta/movie/" + imdbId + ".json")
@@ -3125,10 +3140,80 @@ Item {
             if (xhr.readyState !== XMLHttpRequest.DONE || xhr.status !== 200) return
             try {
                 var m = (JSON.parse(xhr.responseText).meta) || {}
-                if (window.playerImdb === imdbId) window.selectedDescription = m.description || ""
+                // Only fill while this id is still the one on screen/playing.
+                if (window.selectedImdbId !== imdbId && window.playerImdb !== imdbId) return
+                window.selectedDescription = m.description || ""
+                if (m.background) window.selectedBackground = m.background
+                if ((window.selectedPoster || "") === "" && m.poster) window.selectedPoster = m.poster
+                window.selectedYear = m.releaseInfo || m.year || ""
+                window.selectedGenres = (m.genres && m.genres.length) ? m.genres.slice(0, 4).join(" · ") : ""
+                window.selectedRating = parseFloat(m.imdbRating) || 0
+                window.selectedRuntime = m.runtime || ""
+                window.selectedCast = (m.cast && m.cast.length) ? m.cast.slice(0, 4).join(", ") : ""
             } catch (e) {}
         }
         xhr.send()
+    }
+
+    // ── Movie detail page (same shape as the series page: banner, synopsis,
+    //    library shelf, Play/Download). Clicking a movie opens this instead of
+    //    firing straight into the player.
+    function openMoviePage(item, ret) {
+        if (!item) return
+        window.seriesReturn = ret || null
+        window.selectedIsAnime = false
+        window.selectedImdbId = item.imdbId || ""
+        window.selectedTitle = item.title || ""
+        window.selectedPoster = item.poster || ""
+        window.selectedDescription = item.description || ""
+        window.selectedBackground = item.background || ""
+        window.selectedYear = item.year || ""
+        window.selectedGenres = item.genres || ""
+        window.selectedRating = parseFloat(item.rating) || 0
+        window.selectedRuntime = ""
+        window.selectedCast = ""
+        window.currentView = "movie"
+        window.forceActiveFocus()
+        fetchMovieMeta(window.selectedImdbId)
+        saveUiState()
+    }
+
+    function playSelectedMovie() {
+        addToWatchHistory({ imdbId: window.selectedImdbId, title: window.selectedTitle,
+                            poster: window.selectedPoster, type: "movie" })
+        window.playerImdb = window.selectedImdbId || ""
+        enterPlayer(window.selectedTitle)
+        playFromStart("movie", window.selectedTitle, 0, 0)
+    }
+
+    // Fire-and-forget download through video/lib/download.sh, which runs the
+    // normal `video download` path (same backend chain + fail-closed VPN guard)
+    // once per episode, sequentially. `eps` is one episode number or a CSV list
+    // (a whole season). `pick` opens a folder chooser first; without it, files
+    // land in config.json "download_dir" (default ~/Videos/Mercury). The script
+    // notifies on queue/finish, so there's nothing to poll here.
+    readonly property string downloadSh: Quickshell.env("HOME") + "/.config/hypr/scripts/quickshell/movies/video/lib/download.sh"
+    function downloadMedia(kind, title, season, eps, pick) {
+        var args = ["bash", window.downloadSh]
+        if (pick) args.push("--pick")
+        args.push(kind); args.push(title)
+        if (kind !== "movie") {
+            args.push(String(kind === "anime" ? 0 : season))
+            args.push(String(eps))
+            if (kind === "anime") {
+                args.push(window.animeDub ? "dub" : "sub")
+                args.push(String(window.animeDub ? window.animeDubIdx : window.animeSubIdx))
+            }
+        }
+        Quickshell.execDetached(args)
+    }
+    // Every episode currently listed for the open season, as a CSV — the list
+    // is already capped to the anime sub/dub episode count, so "download the
+    // season" never asks for episodes that mode doesn't have.
+    function currentSeasonEpsCsv() {
+        var out = []
+        for (var i = 0; i < episodeModel.count; i++) out.push(episodeModel.get(i).epNum)
+        return out.join(",")
     }
 
     // ── AI: "parse this video" via the local agent (web tools server-side) ──
@@ -3268,8 +3353,8 @@ Item {
     }
 
     // While in the player with no media yet, poll mpv's idle state to show
-    // "Finding source…" and, after a while, a "no source" hint (e.g. mov-cli
-    // has no scraper). Clears as soon as a file actually loads.
+    // "Finding source…" and, after a while, a "no source" hint (e.g. every
+    // backend in the chain failed). Clears as soon as a file actually loads.
     Timer {
         id: playerStatusTimer
         interval: 700; repeat: true
@@ -3281,7 +3366,7 @@ Item {
             if (idle === false) { window.playerStatus = ""; elapsed = 0; return }
             elapsed += interval
             window.playerStatus = elapsed > 35000
-                ? "No source found.\nAnime uses ani-cli (works); movies/TV need a working mov-cli scraper plugin."
+                ? "No source found.\nAnime uses ani-cli, movies/TV use lobster.\nTV episodes past S1E1 need Torrentio + a debrid key (see backends/README.md)."
                 : "Finding source…"
         }
     }
@@ -3298,6 +3383,8 @@ Item {
         // the search/movies grid.
         if ((window.playerKind === "tv" || window.playerKind === "anime") && window.selectedImdbId !== "") {
             window.currentView = "series"
+        } else if (window.playerKind === "movie" && window.selectedImdbId !== "") {
+            window.currentView = "movie"    // back to the movie's detail page
         } else {
             window.currentView = "search"
             searchInput.forceActiveFocus()
@@ -3396,11 +3483,9 @@ Item {
         }
         if (window.mediaType === "anime") { loadAnimeDetails(item); return }
         if (window.mediaType === "movie" || item.type === "movie") {
-            addToWatchHistory({ imdbId: item.imdbId, title: item.title, poster: item.poster, type: "movie" })
-            window.playerImdb = item.imdbId || ""
-            fetchMovieMeta(item.imdbId || "")   // synopsis for the below-video page
-            enterPlayer(item.title)
-            playFromStart("movie", item.title, 0, 0)
+            // Movies get their own detail page (banner + synopsis + Play/Download),
+            // mirroring the series page — no more instant-play from a card.
+            openMoviePage(item, ret)
             return
         }
         loadSeriesDetails(item.imdbId, item.title, item.poster)
@@ -3410,14 +3495,7 @@ Item {
     // movies replay; tv/anime reopen the series page at the season you were on.
     function openHistoryItem(item) {
         if (!item) return
-        if (item.type === "movie") {
-            addToWatchHistory(item)
-            window.playerImdb = item.imdbId || ""
-            fetchMovieMeta(item.imdbId || "")
-            enterPlayer(item.title)
-            playFromStart("movie", item.title, 0, 0)
-            return
-        }
+        if (item.type === "movie") { openMoviePage(item); return }
         window.selectedIsAnime = (item.type === "anime")
         fetchSeriesData(item.imdbId, item.season || 1, item.title, item.poster, false)
     }
@@ -4575,7 +4653,7 @@ Item {
                 : window.mediaType === "anime" ? animeGrid : null
             // The SERIES page reuses this backdrop as its top banner (the
             // show's own background art, home-page style, static at the top).
-            readonly property bool seriesMode: window.currentView === "series"
+            readonly property bool seriesMode: window.currentView === "series" || window.currentView === "movie"
             // Scrolls WITH the dashboard: the art tracks the grid's scroll
             // position 1:1, so the banner and the spotlight text move together
             // (the container's clip trims it at the widget edge).
@@ -5985,12 +6063,43 @@ Item {
                     }
                 }
                 // Season tabs live at the bottom of the top block — on the
-                // same horizontal band as the MAL stack to their left.
+                // same horizontal band as the MAL stack to their left, with the
+                // ⭳ season download at the right end (same spot as the movie
+                // page's download button).
                 Item {
                     Layout.fillWidth: true; Layout.preferredHeight: window.s(44)
+                    Rectangle {
+                        id: seasonDlBtn
+                        anchors { right: parent.right; verticalCenter: parent.verticalCenter }
+                        width: window.s(46); height: window.s(38); radius: window.s(10); z: 2
+                        visible: episodeModel.count > 0
+                        color: seasonDlM.containsMouse ? window.sectionAccent : window.surface0
+                        border.color: seasonDlM.containsMouse ? color : window.surface1; border.width: 1
+                        Behavior on color { ColorAnimation { duration: 200 } }
+                        Text { anchors.centerIn: parent; text: "󰇚"
+                               font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(16)
+                               color: seasonDlM.containsMouse ? window.crust : window.text }
+                        // Left-click → default folder. Right-click → pick one.
+                        // Downloads every episode listed for the open season,
+                        // sequentially (see video/lib/download.sh).
+                        MouseArea {
+                            id: seasonDlM; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            onClicked: (m) => {
+                                var pick = m.button === Qt.RightButton
+                                var eps = window.currentSeasonEpsCsv()
+                                if (eps === "") return
+                                if (window.selectedIsAnime)
+                                    window.downloadMedia("anime", window.selectedTitle, 0, eps, pick)
+                                else
+                                    window.downloadMedia("tv", window.selectedTitle, window.currentSeason, eps, pick)
+                            }
+                        }
+                    }
                     ListView {
                         id: seasonList
-                        anchors.fill: parent
+                        anchors { left: parent.left; top: parent.top; bottom: parent.bottom
+                                  right: seasonDlBtn.left; rightMargin: window.s(10) }
                         orientation: ListView.Horizontal; model: seasonModel; spacing: window.s(8); clip: true
                         Behavior on contentX { NumberAnimation { duration: 350; easing.type: Easing.OutQuart } }
                         delegate: Rectangle {
@@ -6082,6 +6191,12 @@ Item {
                                     anchors { top: parent.top; left: parent.left; right: parent.right; margins: window.s(10) }
                                     height: window.s(38)
                                     spacing: window.s(12)
+                                    // Above epMouse (the title-area synopsis toggle, declared
+                                    // later): its leftMargin clears the ▶ badge but spans the
+                                    // rest of the row, so the ⭳ button at the right edge would
+                                    // otherwise never receive a click. Plain Text children
+                                    // still let clicks fall through to epMouse underneath.
+                                    z: 2
                                     // ▶ play badge — shows the episode number, morphs to a
                                     // play glyph on hover. This is the ONLY play trigger.
                                     Rectangle {
@@ -6114,6 +6229,31 @@ Item {
                                             font.weight: model.hasRealTitle ? Font.Medium : Font.Normal
                                             color: model.hasRealTitle ? window.text : window.subtext0
                                             elide: Text.ElideRight
+                                        }
+                                    }
+                                    // ⭳ download this episode — right edge of the row.
+                                    // (video CLI `download` verb: same backend chain and
+                                    // fail-closed VPN guard as playback.)
+                                    Rectangle {
+                                        Layout.preferredWidth: window.s(30); Layout.preferredHeight: window.s(30)
+                                        Layout.alignment: Qt.AlignVCenter
+                                        radius: window.s(8)
+                                        color: epDlM.containsMouse ? window.sectionAccent : window.surface1
+                                        Behavior on color { ColorAnimation { duration: 150 } }
+                                        Text { anchors.centerIn: parent; text: "󰇚"
+                                               font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(14)
+                                               color: epDlM.containsMouse ? window.crust : window.subtext0 }
+                                        // Left-click → default folder. Right-click → pick one.
+                                        MouseArea {
+                                            id: epDlM; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                            onClicked: (m) => {
+                                                var pick = m.button === Qt.RightButton
+                                                if (window.selectedIsAnime)
+                                                    window.downloadMedia("anime", window.selectedTitle, 0, model.epNum, pick)
+                                                else
+                                                    window.downloadMedia("tv", window.selectedTitle, window.currentSeason, model.epNum, pick)
+                                            }
                                         }
                                     }
                                 }
@@ -6165,6 +6305,154 @@ Item {
                         }
                     }
                 }
+        }
+        // ==========================================
+        // MOVIE VIEW — the series page's twin for a single film: the same
+        // banner (heroBackdrop covers currentView "movie"), the same left
+        // button stack, title + synopsis, and Play / Download.
+        // ==========================================
+        ColumnLayout {
+            anchors.fill: parent; anchors.margins: window.s(20); spacing: window.s(12)
+            visible: window.currentView === "movie"
+
+            RowLayout {
+                Layout.fillWidth: true; Layout.fillHeight: false; spacing: window.s(25)
+
+                ColumnLayout {
+                    Layout.preferredWidth: window.s(220); Layout.minimumWidth: window.s(220); Layout.maximumWidth: window.s(220)
+                    Layout.alignment: Qt.AlignTop; spacing: window.s(12)
+
+                    Rectangle {
+                        Layout.fillWidth: true; Layout.preferredHeight: window.s(45); radius: window.s(10)
+                        color: movBackM.containsMouse ? window.surface2 : window.surface1
+                        Behavior on color { ColorAnimation { duration: 200 } }
+                        Text { anchors.centerIn: parent; text: "← Back"; font.family: "JetBrains Mono"
+                               font.pixelSize: window.s(14); font.weight: Font.Medium; color: window.text }
+                        MouseArea { id: movBackM; anchors.fill: parent; hoverEnabled: true
+                            onClicked: {
+                                var r = window.seriesReturn
+                                window.seriesReturn = null
+                                window.currentView = "search"
+                                if (r && r.kind === "catpage") window.openCatPage({ key: r.key, title: r.title, url: r.url })
+                                else if (r && r.kind === "library") window.openLibrary()
+                                else searchInput.forceActiveFocus()
+                                saveUiState()
+                            } }
+                    }
+                    // Resume bar — how far into the film you got last time.
+                    Rectangle {
+                        Layout.fillWidth: true; Layout.preferredHeight: window.s(4); radius: height / 2
+                        color: Qt.rgba(1, 1, 1, 0.10)
+                        visible: movProgFill.frac > 0
+                        Rectangle {
+                            id: movProgFill
+                            readonly property real frac: window.watchFrac("mov:" + window.selectedImdbId)
+                            width: parent.width * frac; height: parent.height; radius: height / 2
+                            color: window.sectionAccent
+                        }
+                    }
+                    // MAL-style shelving, identical to the series page.
+                    ColumnLayout {
+                        Layout.fillWidth: true; spacing: window.s(6)
+                        Repeater {
+                            model: window.malStatuses
+                            delegate: Rectangle {
+                                Layout.fillWidth: true; Layout.preferredHeight: window.s(28); radius: window.s(8)
+                                property bool cur: modelData.key === window.libStatusOf(window.selectedImdbId)
+                                color: cur ? window.sectionAccent : (movStM.containsMouse ? window.surface1 : window.surface0)
+                                Behavior on color { ColorAnimation { duration: 150 } }
+                                Text { anchors.centerIn: parent; text: modelData.label
+                                       font.family: "JetBrains Mono"; font.pixelSize: window.s(11)
+                                       font.weight: parent.cur ? Font.Bold : Font.Medium
+                                       color: parent.cur ? window.crust : window.text }
+                                MouseArea { id: movStM; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                    onClicked: window.libSet({ imdbId: window.selectedImdbId, title: window.selectedTitle,
+                                                               poster: window.selectedPoster, type: "movie" }, modelData.key) }
+                            }
+                        }
+                    }
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true; Layout.fillHeight: true; spacing: window.s(8)
+                    Text {
+                        Layout.fillWidth: true
+                        text: window.selectedTitle; textFormat: Text.PlainText
+                        font.family: "JetBrains Mono"; font.pixelSize: window.s(22); font.weight: Font.Bold
+                        color: window.text
+                        wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
+                    }
+                    // ★ rating · year · runtime · genres
+                    Text {
+                        Layout.fillWidth: true
+                        visible: text !== ""
+                        text: (window.selectedRating > 0 ? "★ " + window.selectedRating.toFixed(1) : "")
+                              + (window.selectedYear !== "" ? (window.selectedRating > 0 ? "   ·   " : "") + window.selectedYear : "")
+                              + (window.selectedRuntime !== "" ? "   ·   " + window.selectedRuntime : "")
+                              + (window.selectedGenres !== "" ? "   ·   " + window.selectedGenres : "")
+                        textFormat: Text.PlainText
+                        font.family: "JetBrains Mono"; font.pixelSize: window.s(11); font.weight: Font.Medium
+                        color: window.subtext0; elide: Text.ElideRight
+                    }
+                    Flickable {
+                        Layout.fillWidth: true; Layout.fillHeight: true
+                        visible: window.selectedDescription !== ""
+                        clip: true; contentHeight: movDescText.implicitHeight
+                        boundsBehavior: Flickable.StopAtBounds
+                        ScrollBar.vertical: ScrollBar { contentItem: Rectangle { radius: window.s(2); color: window.surface2; implicitWidth: window.s(3) } }
+                        Text {
+                            id: movDescText
+                            width: parent.width - window.s(10)
+                            text: window.selectedDescription; textFormat: Text.PlainText
+                            font.family: "JetBrains Mono"; font.pixelSize: window.s(11)
+                            color: window.subtext0; wrapMode: Text.WordWrap; lineHeight: 1.4
+                        }
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        visible: window.selectedCast !== ""
+                        text: "Cast:  " + window.selectedCast; textFormat: Text.PlainText
+                        font.family: "JetBrains Mono"; font.pixelSize: window.s(11)
+                        color: window.surface2; elide: Text.ElideRight
+                    }
+                    // Action band — sits exactly where the series page's season
+                    // tabs do: ▶ Play on the left, ⭳ Download at the right end.
+                    Item {
+                        Layout.fillWidth: true; Layout.preferredHeight: window.s(44)
+                        Rectangle {
+                            anchors { left: parent.left; verticalCenter: parent.verticalCenter }
+                            width: movPlayT.width + window.s(34); height: window.s(38); radius: window.s(10)
+                            color: movPlayM.containsMouse ? window.sectionAccent : window.surface0
+                            border.color: movPlayM.containsMouse ? color : window.surface1; border.width: 1
+                            Behavior on color { ColorAnimation { duration: 200 } }
+                            Text { id: movPlayT; anchors.centerIn: parent
+                                   text: movProgFill.frac > 0 && movProgFill.frac < 1 ? "▶  Resume" : "▶  Play"
+                                   font.family: "JetBrains Mono"; font.pixelSize: window.s(13); font.weight: Font.Bold
+                                   color: movPlayM.containsMouse ? window.crust : window.text }
+                            MouseArea { id: movPlayM; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: window.playSelectedMovie() }
+                        }
+                        Rectangle {
+                            anchors { right: parent.right; verticalCenter: parent.verticalCenter }
+                            width: window.s(46); height: window.s(38); radius: window.s(10)
+                            color: movDlM.containsMouse ? window.sectionAccent : window.surface0
+                            border.color: movDlM.containsMouse ? color : window.surface1; border.width: 1
+                            Behavior on color { ColorAnimation { duration: 200 } }
+                            Text { anchors.centerIn: parent; text: "󰇚"
+                                   font.family: "Iosevka Nerd Font"; font.pixelSize: window.s(16)
+                                   color: movDlM.containsMouse ? window.crust : window.text }
+                            // Left-click → default folder. Right-click → pick one.
+                            MouseArea { id: movDlM; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                onClicked: (m) => window.downloadMedia("movie", window.selectedTitle, 0, 0,
+                                                                       m.button === Qt.RightButton) }
+                        }
+                    }
+                }
+            }
+            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1
+                        color: Qt.rgba(window.surface1.r, window.surface1.g, window.surface1.b, 0.5) }
+            Item { Layout.fillWidth: true; Layout.fillHeight: true }
         }
         // ==========================================
         // PiP VIEW  (control surface for the mpv PiP sibling window)
@@ -6238,7 +6526,7 @@ Item {
                 Repeater {
                     model: [
                         { glyph: "󰕷", title: "Anime", sub: "ani-cli", kind: "anime" },
-                        { glyph: "󰿎", title: "Movies / TV", sub: "mov-cli", kind: "movie" }
+                        { glyph: "󰿎", title: "Movies / TV", sub: "lobster", kind: "movie" }
                     ]
                     delegate: Rectangle {
                         Layout.preferredWidth: window.s(160); Layout.preferredHeight: window.s(58); radius: window.s(12)
@@ -6307,7 +6595,7 @@ Item {
 
             Text {
                 Layout.fillWidth: true
-                text: "Everything streams into one floating mpv. Paste a YouTube/yt-dlp link or file above; Anime (ani-cli) and Movies/TV (mov-cli) open in a terminal; the Movies/TV grid plays the selected title/episode straight in here. SUPER+SHIFT+P toggles click-through.\nNeeds: yt-dlp (sudo pacman -S yt-dlp), ani-cli (paru -S ani-cli), mov-cli + a scraper plugin (see the mov-cli wiki)."
+                text: "Everything streams into one floating mpv. Paste a YouTube/yt-dlp link or file above; Anime (ani-cli) and Movies/TV (lobster) open in a terminal; the Movies/TV grid plays the selected title/episode straight in here. SUPER+SHIFT+P toggles click-through.\nNeeds: yt-dlp (sudo pacman -S yt-dlp), ani-cli (paru -S ani-cli), lobster (paru -S lobster-git). Torrentio + a debrid key backs both up — see backends/README.md."
                 font.family: "JetBrains Mono"; font.pixelSize: window.s(11); color: window.subtext0
                 wrapMode: Text.WordWrap; lineHeight: 1.4
             }
@@ -6339,7 +6627,7 @@ Item {
                 function onCurrentYtIdChanged() { playerView.ytPageOff = 0 }
             }
             // MpvItem stays instantiated so its IPC socket (the one ani-cli /
-            // mov-cli / pip_mpv.sh target) is live whenever the widget is loaded;
+            // lobster / pip_mpv.sh target) is live whenever the widget is loaded;
             // we just reveal it for the player view.
             visible: window.currentView === "player"
 

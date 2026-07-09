@@ -6,9 +6,9 @@ in this folder and it's available; no QML, no provider changes.
 
 ```
 video/backends/
-├── movcli               # movies + TV via mov-cli
 ├── lobster              # movies + TV via lobster-git
 ├── anicli               # anime via ani-cli
+├── torrentio            # LAST-RESORT: movies/TV/anime via Torrentio + debrid
 └── jellyfin.example     # WORKED TEMPLATE — cp to `jellyfin`, fill in, enable
 ```
 
@@ -18,7 +18,7 @@ Per-kind, in `~/.config/hypr/config.json`:
 
 ```jsonc
 "movie_backend": "lobster",     // unset → default chain below
-"tv_backend":    "movcli",
+"tv_backend":    "torrentio",
 "anime_backend": "anicli"
 ```
 
@@ -27,11 +27,45 @@ the built-in defaults, so a dead source cascades to the next one:
 
 | kind | default chain |
 |---|---|
-| movie | `lobster → movcli` |
-| tv | `lobster → movcli` |
-| anime | `anicli` |
+| movie | `lobster → torrentio` |
+| tv | `lobster → torrentio` |
+| anime | `anicli → torrentio` |
 
-Setting `"movie_backend": "jellyfin"` makes the chain `jellyfin → lobster → movcli`.
+Setting `"movie_backend": "jellyfin"` makes the chain `jellyfin → lobster → torrentio`.
+
+### torrentio — the safety net
+
+Sits at the **end** of every chain: the scrapers (lobster, ani-cli)
+serve everything normally, and torrentio only runs once they've all failed —
+which is what happens when a scraper's site changes and it rots. It self-skips
+in ~10ms unless configured, so an unconfigured install pays nothing for it.
+
+It resolves the title to a catalog id — IMDb via Cinemeta for movies/TV, Kitsu
+for anime (absolute episode numbering, `kitsu:<id>:<ep>`) — and asks the
+Torrentio Stremio addon for sources; with a **debrid** account the cached
+entries carry direct HTTPS urls that stream straight into the PiP. Anime
+sub/dub is whatever the release carries, so the series page's Sub/Dub toggle
+doesn't apply on this fallback path.
+
+Configure with:
+
+```jsonc
+"torrentio_url":    "https://torrentio.strem.fun",
+"torrentio_debrid": "realdebrid",   // or alldebrid | premiumize | torbox | offcloud
+"torrentio_opts":   ""              // e.g. "sort=qualitysize|qualityfilter=cam,scr"
+```
+
+```sh
+~/.config/hypr/scripts/secrets.sh set torrentio_debrid_key <your-debrid-api-key>
+```
+
+All of its traffic (catalog lookup, Torrentio, and the stream itself) rides the
+gluetun proxy under the same fail-closed VPN guard as every other movie/tv/
+anime backend — the debrid service always sees the VPN exit IP. Without a
+debrid key Torrentio only yields raw infohashes, which can't be forced through
+the HTTP proxy, so the backend refuses them rather than leak outside the
+tunnel. Being last in the chain, that refusal simply means "no source found",
+exactly as before it existed.
 
 ## The backend contract
 

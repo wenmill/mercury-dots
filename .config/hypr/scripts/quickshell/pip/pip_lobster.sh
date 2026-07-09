@@ -2,7 +2,7 @@
 #
 # Launch lobster in a terminal, with playback routed into the mpv PiP.
 #
-# Like pip_movcli.sh / pip_anicli.sh: lobster is interactive (fzf), so it runs in
+# Like pip_anicli.sh: lobster is interactive (fzf), so it runs in
 # a terminal, and a shim `mpv` (first on PATH) forwards its playback — the stream
 # URL plus lobster's referrer / http-header-fields / sub-file flags — into the
 # single PiP window via pip_mpv.sh.

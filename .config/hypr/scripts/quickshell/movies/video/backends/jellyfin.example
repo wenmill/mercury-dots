@@ -8,7 +8,7 @@
 #        "jellyfin_token": "<an API key from JF: Dashboard → API Keys>",
 #        "movie_backend":  "jellyfin",   // and/or "tv_backend", "anime_backend"
 #   3. that's it — `video play movie "Dune"` now streams from Jellyfin, and if
-#      Jellyfin has nothing it falls through to your next backend (lobster/movcli).
+#      Jellyfin has nothing it falls through to your next backend (lobster/torrentio).
 #
 # It implements the backend contract:
 #   capabilities                  -> kinds served

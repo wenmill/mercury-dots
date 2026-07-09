@@ -4,9 +4,10 @@
 # -----------------------------------------------------------------------------
 # One command for every video operation, backed by pluggable providers so a new
 # source is a drop-in file (see providers/ + README.md). The QML widget calls
-# ONLY this; it never talks to mov-cli/ani-cli/yt-dlp/mpv directly.
+# ONLY this; it never talks to lobster/ani-cli/yt-dlp/mpv directly.
 #
 #   video play    <kind> <query|id> [season] [ep]   resolve + play into the PiP
+#   video download<kind> <query|id> [season] [ep]   resolve + save to download_dir
 #   video resolve <kind> <query|id> [season] [ep]   print stream JSON, don't play
 #   video search  <kind> <query>                    print results (provider format)
 #   video episodes<kind> <id>                       list episodes (if supported)
@@ -30,7 +31,7 @@ usage() { sed -n '2,/^# ===/p' "$0" | sed 's/^# \{0,1\}//; s/^=.*//'; }
 verb="${1:-help}"; shift 2>/dev/null || true
 
 case "$verb" in
-    play|resolve|search|episodes|browse|capabilities)
+    play|resolve|search|episodes|browse|capabilities|download)
         kind="${1:-}"; shift 2>/dev/null || true
         [ -n "$kind" ] || { echo "video $verb: missing <kind> (try: video providers)" >&2; exit 2; }
         prov="$PROV_DIR/$kind"

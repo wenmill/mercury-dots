@@ -14,7 +14,7 @@ MpvItem::MpvItem(QQuickItem *parent)
         setProperty(QStringLiteral("ytdl"), QStringLiteral("yes"));
         setProperty(QStringLiteral("hwdec"), QStringLiteral("auto-safe"));
 
-        // IPC socket: the same one ani-cli/mov-cli/pip_mpv.sh target, so the
+        // IPC socket: the same one ani-cli/lobster/pip_mpv.sh target, so the
         // background resolver loads straight into this embedded player.
         const QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR", QStringLiteral("/tmp"));
         setProperty(QStringLiteral("input-ipc-server"), runtime + QStringLiteral("/mpv-pip.sock"));

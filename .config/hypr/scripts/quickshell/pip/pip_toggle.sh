@@ -6,7 +6,7 @@
 #   pip_toggle.sh toggle [media]  launch / show / hide
 #
 # The PiP is a plain native mpv window (vo=gpu) kept idle with an IPC socket, so
-# ani-cli / mov-cli / pip_mpv.sh load into it over IPC. Hyprland window-rules
+# ani-cli / lobster / pip_mpv.sh load into it over IPC. Hyprland window-rules
 # (matched on the window TITLE) float/size/pin it.
 #
 # NOTE: this replaced an in-QML Qt+libmpv render player that segfaulted on this
