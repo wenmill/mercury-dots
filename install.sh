@@ -1661,27 +1661,65 @@ printf "  -> Font cache updated %-25s ${C_GREEN}[ OK ]${RESET}\n" ""
 # ==============================================================================
 echo -e "\n${C_CYAN}[ INFO ]${RESET} Building native components..."
 
+# One guard for every native build. Each of these compiles a Qt/WebEngine C++
+# app, and each hid the same trap the honcho stack did:
+#
+#   * stdin left on the terminal — any stray prompt (or a build.sh that stops to
+#     ask something) blocks invisibly, forever, behind a redirected log;
+#   * no timeout — a genuine stall (OOM thrash on a small VM is the usual cause
+#     for these WebEngine links) can never end on its own;
+#   * output hidden in a file — a silent cursor is indistinguishable from a hang,
+#     which is exactly how "the binary doesn't complete" looks from outside.
+#
+# build_native fixes all three: reads /dev/null, runs under a timeout, and
+# streams the log to the terminal so you can watch it progress or see the real
+# error the instant it fails. NATIVE_BUILD_QUIET=1 restores the log-only form.
+NATIVE_BUILD_TIMEOUT="${NATIVE_BUILD_TIMEOUT:-600}"
+build_native() {   # <label> <log> <script> [args...]
+    local label="$1" log="$2" script="$3"; shift 3
+    : > "$log"
+    echo "  -> Building $label..."
+    echo -e "     ${DIM}full log: $log${RESET}"
+
+    local tail_pid=""
+    if [ "${NATIVE_BUILD_QUIET:-0}" != "1" ]; then
+        tail -n +1 -f "$log" 2>/dev/null &
+        tail_pid=$!
+    fi
+
+    timeout -k 15 --foreground "$NATIVE_BUILD_TIMEOUT" \
+        bash "$script" "$@" </dev/null >>"$log" 2>&1
+    local rc=$?
+
+    if [ -n "$tail_pid" ]; then
+        sleep 1                                     # let tail flush the last lines
+        kill "$tail_pid" 2>/dev/null || true
+        wait "$tail_pid" 2>/dev/null || true
+    fi
+
+    if [ "$rc" -eq 0 ]; then
+        printf "  -> %-30s ${C_GREEN}[ OK ]${RESET}\n" "$label built"
+    elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        step_fail "$label build timed out after ${NATIVE_BUILD_TIMEOUT}s" \
+            "usually low RAM on this machine — add swap, or raise NATIVE_BUILD_TIMEOUT; log: $log"
+    else
+        step_fail "$label build" "see $log"
+        tail -n 8 "$log" 2>/dev/null | sed 's/^/       /'
+    fi
+}
+
+# `build`, not build.sh's default `run`: run compiles and then execs the binary,
+# a Qt layer-shell app that cannot init a platform plugin on a TTY ("could not
+# connect to display"). It exits non-zero, and the installer would report a build
+# that reached "[100%] Built target obsidian-shell" as a failure.
 OBS_BUILD="$HYPR_DIR/scripts/quickshell/floating/obsidian-shell/build.sh"
 if [ -f "$OBS_BUILD" ]; then
-    # `build`, not the default `run`. build.sh's first argument defaults to "run",
-    # which compiles and then execs the binary — a Qt layer-shell app that cannot
-    # initialise a platform plugin on a TTY ("could not connect to display"). It
-    # exits non-zero, and the installer reported a build that reached "[100%] Built
-    # target obsidian-shell" as a failed build.
-    if bash "$OBS_BUILD" build >/tmp/obsidian-shell-build.log 2>&1; then
-        printf "  -> obsidian-shell built %-24s ${C_GREEN}[ OK ]${RESET}\n" ""
-    else
-        step_fail "obsidian-shell build" "see /tmp/obsidian-shell-build.log"
-    fi
+    build_native "obsidian-shell" /tmp/obsidian-shell-build.log "$OBS_BUILD" build
 fi
 
 PIP_BUILD="$HYPR_DIR/scripts/quickshell/pip/mpvplugin/build.sh"
 if [ -f "$PIP_BUILD" ]; then
-    if bash "$PIP_BUILD" >/tmp/mpvplugin-build.log 2>&1; then
-        printf "  -> pip mpvplugin built %-25s ${C_GREEN}[ OK ]${RESET}\n" ""
-    else
-        step_fail "pip mpvplugin build" "see /tmp/mpvplugin-build.log"
-    fi
+    build_native "pip mpvplugin" /tmp/mpvplugin-build.log "$PIP_BUILD"
 fi
 
 # hyprbars plugin via hyprpm — https://wiki.hypr.land/Plugins/Using-Plugins/
