@@ -1,0 +1,11 @@
+# Builds the Alexandria audiobook image. Uses Dockerfile.rocm (our GPU build on
+# PyTorch ROCm wheels for the AMD RX 9060 XT / RDNA4) instead of upstream's
+# CUDA Dockerfile. Dockerfile.rocm is a separate, untracked file so `git pull`
+# updates never conflict. `systemctl --user restart alexandria-build` rebuilds.
+[Build]
+ImageTag=localhost/alexandria-audiobook:latest
+File=%h/alexandria-audiobook/Dockerfile.rocm
+SetWorkingDirectory=%h/alexandria-audiobook
+
+[Install]
+WantedBy=default.target

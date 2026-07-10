@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly unattended audiobook generation (Kavita library -> Alexandria)
+After=alexandria.service gemma.service
+Wants=alexandria.service gemma.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.config/hypr/scripts/audiobook_night.py
+TimeoutStartSec=infinity

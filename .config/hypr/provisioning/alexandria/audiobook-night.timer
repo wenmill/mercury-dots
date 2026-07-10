@@ -1,0 +1,10 @@
+[Unit]
+Description=Fire nightly audiobook generation (the script self-gates on load/GPU/time)
+
+[Timer]
+OnCalendar=*-*-* 01:00:00
+RandomizedDelaySec=30min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

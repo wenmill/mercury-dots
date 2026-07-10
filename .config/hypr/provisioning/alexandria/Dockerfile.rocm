@@ -1,0 +1,64 @@
+# ROCm build of Alexandria — runs Qwen3-TTS on the AMD Radeon RX 9060 XT
+# (Navi 44 / RDNA4 / gfx1200) instead of CPU. Kept as a SEPARATE file from the
+# upstream Dockerfile so `git pull` never conflicts; the alexandria.build quadlet
+# points File= at this one.
+#
+# Upstream's base is pytorch/pytorch:*-cuda* (NVIDIA). We can't reuse it — CUDA
+# torch can't see an AMD GPU. Instead: a slim Python base + PyTorch's official
+# ROCm wheels (self-contained: they bundle the ROCm runtime libs, so no system
+# ROCm install is needed inside the image — only /dev/kfd + /dev/dri passthrough
+# at run time, handled by the .container quadlet).
+FROM docker.io/library/python:3.12-slim
+
+WORKDIR /alexandria
+
+# Audio processing deps (same as upstream) + libgomp (torch OpenMP).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg libsndfile1 libgomp1 && \
+    rm -rf /var/lib/apt/lists/*
+
+# ROCm PyTorch FIRST so nothing later pulls a CPU/CUDA torch over it. A pip
+# constraints file pins torch/torchaudio to what we install, so the app deps
+# (and qwen-tts, which lists an unpinned torch) can never clobber the ROCm build.
+RUN pip install --no-cache-dir torch torchaudio \
+      --index-url https://download.pytorch.org/whl/rocm6.4 && \
+    python - <<'PY'
+import torch, pathlib
+assert torch.version.hip, f"expected a ROCm torch, got {torch.__version__}"
+pathlib.Path("/tmp/constraints.txt").write_text(
+    f"torch=={torch.__version__}\ntorchaudio=={__import__('torchaudio').__version__}\n")
+print("pinned:", open("/tmp/constraints.txt").read())
+PY
+
+# App Python deps + qwen-tts, constrained so torch stays the ROCm build.
+COPY app/requirements.txt /alexandria/app/requirements.txt
+RUN PIP_CONSTRAINT=/tmp/constraints.txt pip install --no-cache-dir -r app/requirements.txt && \
+    PIP_CONSTRAINT=/tmp/constraints.txt pip install --no-cache-dir qwen-tts==0.1.1 && \
+    python -c "import torch; assert torch.version.hip, 'torch was clobbered to non-ROCm'; print('ROCm torch intact:', torch.__version__)"
+
+# Copy application code (same layout as upstream Dockerfile)
+COPY app/ /alexandria/app/
+COPY default_prompts.txt review_prompts.txt /alexandria/
+COPY builtin_lora/ /alexandria/builtin_lora/
+
+# RDNA4 (gfx1200) speed: run the Qwen3-TTS models in fp16 instead of bf16 when
+# ALEXANDRIA_FP16=1. Measured on this card, fp16 + the TunableOp/hipBLASLt/MIOpen
+# stack (set in the quadlet) drops voice_design RTF from ~2.3 (bf16) to ~2.0
+# (median 2.07, frequently <2.0). Env-gated so it defaults to bf16 (the model
+# authors' choice) and is trivially reverted by unsetting ALEXANDRIA_FP16.
+# NOTE: fp16 has less dynamic range than bf16 — listen for artifacts; revert if any.
+RUN sed -i 's/torch\.bfloat16 if "cuda" in device/(torch.float16 if os.environ.get("ALEXANDRIA_FP16")=="1" else torch.bfloat16) if "cuda" in device/g' /alexandria/app/tts.py && \
+    grep -c 'ALEXANDRIA_FP16' /alexandria/app/tts.py
+
+RUN mkdir -p /alexandria/scripts \
+    /alexandria/designed_voices \
+    /alexandria/clone_voices \
+    /alexandria/lora_models \
+    /alexandria/lora_datasets \
+    /alexandria/dataset_builder \
+    /alexandria/app/uploads
+
+ENV ALEXANDRIA_HOST=0.0.0.0
+EXPOSE 4200
+
+CMD ["python", "app/app.py"]

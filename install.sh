@@ -138,6 +138,27 @@ REGEOF
     printf "  -> podman registries.conf written %-13s ${C_GREEN}[ OK ]${RESET}\n" ""
 }
 
+# ── podman quadlets ───────────────────────────────────────────────────────────
+# A .container file is not a unit: systemd's quadlet generator turns it into one
+# at daemon-reload, and a *generated* unit cannot be enabled —
+#     Failed to enable unit: /run/user/1000/systemd/generator/x.service is
+#     transient or generated
+# The quadlet's own [Install] WantedBy= is what starts it at boot, so all the
+# installer has to do is start it now. `systemctl enable --now` fails outright
+# and, because the failure is routed to a step_warn, looks like a benign
+# "pending". That mistake has been made once per quadlet in this file; this
+# helper is here so it is only ever written once.
+#
+#   quadlet_start <unit> <label> [hint]
+quadlet_start() {
+    systemctl --user daemon-reload 2>/dev/null || true
+    if systemctl --user start "$1" >/dev/null 2>&1; then
+        _step_line "$2 started" "$C_GREEN" " OK "
+    else
+        step_warn "$2 pending" "${3:-starts on first graphical login}"
+    fi
+}
+
 HEADLESS=false
 
 while [[ "$#" -gt 0 ]]; do
@@ -1583,7 +1604,12 @@ echo -e "\n${C_CYAN}[ INFO ]${RESET} Building native components..."
 
 OBS_BUILD="$HYPR_DIR/scripts/quickshell/floating/obsidian-shell/build.sh"
 if [ -f "$OBS_BUILD" ]; then
-    if bash "$OBS_BUILD" >/tmp/obsidian-shell-build.log 2>&1; then
+    # `build`, not the default `run`. build.sh's first argument defaults to "run",
+    # which compiles and then execs the binary — a Qt layer-shell app that cannot
+    # initialise a platform plugin on a TTY ("could not connect to display"). It
+    # exits non-zero, and the installer reported a build that reached "[100%] Built
+    # target obsidian-shell" as a failed build.
+    if bash "$OBS_BUILD" build >/tmp/obsidian-shell-build.log 2>&1; then
         printf "  -> obsidian-shell built %-24s ${C_GREEN}[ OK ]${RESET}\n" ""
     else
         step_fail "obsidian-shell build" "see /tmp/obsidian-shell-build.log"
@@ -1705,11 +1731,91 @@ TimeoutStartSec=120
 WantedBy=default.target
 EOF
     chmod 644 "$KAVITA_QUADLET"
-    systemctl --user daemon-reload
-    systemctl --user enable --now kavita.service 2>/dev/null \
-        && printf "  -> kavita.service enabled %-21s ${C_GREEN}[ OK ]${RESET}\n" "" \
-        || step_warn "kavita.service pending" "starts on first graphical login"
+    quadlet_start kavita.service "kavita.service"
     echo "  -> ${C_CYAN}Kavita:${RESET} http://localhost:5000  (library: $KAVITA_LIBRARY)"
+
+    # ── Alexandria (Qwen3-TTS audiobook studio on :4200) ──
+    #
+    # Inside the containers guard on purpose: it needs podman, $QUADLET_DIR
+    # (created above) and $KAVITA_LIBRARY (assigned above). Run outside it, with
+    # containers declined, $KAVITA_LIBRARY is unset and `mkdir -p
+    # "$KAVITA_LIBRARY/Audiobooks"` becomes `mkdir -p /Audiobooks`.
+    #
+    # Built and run as a podman quadlet. We ship Dockerfile.rocm because upstream's
+    # Dockerfile is CUDA-based and CUDA torch cannot see an AMD GPU; it lives beside
+    # the upstream file rather than replacing it, so `git pull` never conflicts.
+    ALEX_PROV="$HYPR_DIR/provisioning/alexandria"
+    ALEX_DIR="$HOME/alexandria-audiobook"
+    ALEX_REPO="https://github.com/Finrandojin/alexandria-audiobook.git"
+    ALEX_LOG="/tmp/alexandria-install.log"
+
+    if [ -d "$ALEX_PROV" ]; then
+        # Gated on /dev/kfd: without an AMD ROCm GPU the image would spend a very
+        # long download building a torch with nothing to run on. Not a warning —
+        # nobody asked for AMD-only TTS, and a debug summary full of unactionable
+        # warnings teaches people to ignore it.
+        if [ ! -e /dev/kfd ]; then
+            echo -e "  -> ${DIM}Alexandria skipped (no /dev/kfd; needs an AMD ROCm GPU)${RESET}"
+        elif ! command -v git &>/dev/null; then
+            step_warn "Alexandria skipped" "git not installed"
+        else
+            : > "$ALEX_LOG"
+            alex_ok=true
+
+            # Clone into a temp dir and merge, same as Honcho: a pre-existing
+            # directory must not make `git clone` fail on "destination not empty".
+            if [ ! -d "$ALEX_DIR/.git" ]; then
+                ALEX_TMP="$(mktemp -d)"
+                if GIT_TERMINAL_PROMPT=0 timeout 300 git clone --depth 1 "$ALEX_REPO" \
+                        "$ALEX_TMP/alexandria" </dev/null >>"$ALEX_LOG" 2>&1 \
+                        && mkdir -p "$ALEX_DIR" \
+                        && cp -a "$ALEX_TMP/alexandria/." "$ALEX_DIR/"; then
+                    printf "  -> Alexandria cloned %-27s ${C_GREEN}[ OK ]${RESET}\n" ""
+                else
+                    step_warn "Alexandria clone failed" "see $ALEX_LOG"
+                    alex_ok=false
+                fi
+                rm -rf "$ALEX_TMP"
+            else
+                # A refusal here (dirty tree, diverged branch) is not fatal — the
+                # checkout on disk still builds — but it must not be silent, or the
+                # image is quietly built from a stale tree.
+                ( cd "$ALEX_DIR" && GIT_TERMINAL_PROMPT=0 timeout 120 git pull --ff-only \
+                    </dev/null >>"$ALEX_LOG" 2>&1 ) \
+                    || step_warn "Alexandria not updated" "building the existing checkout"
+            fi
+
+            # Every step below is a precondition for the next. Chain them so a
+            # failure cannot reach the [ OK ] line: a missing quadlet reported as
+            # written is worse than an honest warning.
+            if [ "$alex_ok" = true ] \
+                    && cp "$ALEX_PROV/Dockerfile.rocm" "$ALEX_DIR/Dockerfile.rocm" \
+                    && mkdir -p "$KAVITA_LIBRARY/Audiobooks" \
+                    && cp "$ALEX_PROV/alexandria.build" "$ALEX_PROV/alexandria.container" "$QUADLET_DIR/" \
+                    && chmod 644 "$QUADLET_DIR/alexandria.build" "$QUADLET_DIR/alexandria.container"; then
+
+                # audiobook_night.py turns unread ebooks into m4b overnight. Real
+                # unit files, not quadlets, so `enable` works here. Installed but
+                # NOT enabled: the timer pulls in alexandria.service via Wants=,
+                # which would kick off the multi-GB build we just told the user to
+                # defer — unattended, at 01:00.
+                mkdir -p "$HOME/.config/systemd/user"
+                cp "$ALEX_PROV/audiobook-night.service" "$ALEX_PROV/audiobook-night.timer" \
+                   "$HOME/.config/systemd/user/" 2>/dev/null || true
+                systemctl --user daemon-reload 2>/dev/null || true
+
+                printf "  -> Alexandria quadlets written %-17s ${C_GREEN}[ OK ]${RESET}\n" ""
+                echo -e "     ${DIM}Not started: the first build pulls multi-GB ROCm torch wheels."
+                echo -e "     When you have the time:"
+                echo -e "       ${BOLD}systemctl --user start alexandria.service${RESET}${DIM}"
+                echo -e "       ${BOLD}systemctl --user enable --now audiobook-night.timer${RESET}${DIM}  (nightly 01:00)"
+                echo -e "     Studio on http://127.0.0.1:4200 . Qwen3-TTS wants ~3-4GB VRAM,"
+                echo -e "     so stop gemma.service first on a 16GB card.${RESET}"
+            elif [ "$alex_ok" = true ]; then
+                step_warn "Alexandria quadlets not written" "see $ALEX_LOG"
+            fi
+        fi
+    fi
 fi
 
 # ── gluetun (VPN egress for the movies/tv/anime scrapers) ──
@@ -1843,10 +1949,7 @@ TimeoutStartSec=120
 WantedBy=default.target
 EOF
     chmod 644 "$SEARXNG_QUADLET"
-    systemctl --user daemon-reload
-    systemctl --user enable --now searxng-ai.service 2>/dev/null \
-        && printf "  -> searxng-ai.service enabled %-17s ${C_GREEN}[ OK ]${RESET}\n" "" \
-        || step_warn "searxng-ai.service pending" "starts on first graphical login"
+    quadlet_start searxng-ai.service "searxng-ai.service"
     echo "  -> ${C_CYAN}JSON query:${RESET} http://localhost:8888/search?q=hello&format=json"
 
     # ── Inference: vLLM-TurboQuant (AMD) or Ollama (everyone else) ──
@@ -1893,10 +1996,8 @@ TimeoutStartSec=600
 WantedBy=default.target
 EOF
         chmod 644 "$VLLM_QUADLET"
-        systemctl --user daemon-reload
-        systemctl --user enable --now vllm-turboquant.service 2>/dev/null \
-            && printf "  -> vllm-turboquant.service enabled %-13s ${C_GREEN}[ OK ]${RESET}\n" "" \
-            || step_warn "vllm-turboquant.service pending" "journalctl --user -fu vllm-turboquant"
+        quadlet_start vllm-turboquant.service "vllm-turboquant.service" \
+            "journalctl --user -fu vllm-turboquant"
         echo -e "  -> ${C_CYAN}OpenAI API:${RESET} http://localhost:8000/v1  (model: ${BOLD}$VLLM_MODEL${RESET})"
         echo -e "  -> ${DIM}First start downloads weights: journalctl --user -fu vllm-turboquant${RESET}"
     else
@@ -2525,23 +2626,30 @@ if [ "$GPU_VENDOR" = "VM" ]; then
 fi
 
 echo -e "\nNext steps:"
-echo -e "  1. Log out, then start the session with uwsm: TTY -> ${C_GREEN}uwsm start hyprland.desktop${RESET}"
+# Numbered by a counter, not by hand: half these steps are conditional, so
+# hardcoded numerals skip (a vLLM install printed 1, 2, 4, 5, 6). The counter is
+# bumped by a plain function call — NOT $(_next), which runs in a subshell and
+# would leave every step numbered 1.
+_step_n=0
+_next() { _step_n=$(( _step_n + 1 )); }
+
+_next; echo -e "  $_step_n. Log out, then start the session with uwsm: TTY -> ${C_GREEN}uwsm start hyprland.desktop${RESET}"
 echo -e "     (or via SDDM's 'Hyprland (uwsm)' entry if you enabled it)."
-echo -e "  2. Store your API tokens in the keyring:"
+_next; echo -e "  $_step_n. Store your API tokens in the keyring:"
 echo -e "       ${C_GREEN}~/.config/hypr/scripts/secrets.sh set <key> <value>${RESET}"
 echo -e "     (${DIM}secrets.sh list shows every key the widgets look for. Files never"
 echo -e "      hold secret values — config.json carries only URLs/paths.${RESET})"
 if [ "$OPT_AI" = true ] && [ "$USE_VLLM_TURBOQUANT" = false ]; then
-    echo -e "  3. ${C_GREEN}ollama pull qwen2.5:7b${RESET}  (or whichever model you want as the default)"
+    _next; echo -e "  $_step_n. ${C_GREEN}ollama pull qwen2.5:7b${RESET}  (or whichever model you want as the default)"
 fi
 if [ "$OPT_VPN" = true ]; then
-    echo -e "  4. Fill VPN credentials into ${C_GREEN}~/.config/gluetun/gluetun.env${RESET}, then:"
+    _next; echo -e "  $_step_n. Fill VPN credentials into ${C_GREEN}~/.config/gluetun/gluetun.env${RESET}, then:"
     echo -e "     ${C_GREEN}systemctl --user daemon-reload && systemctl --user start gluetun${RESET}"
 fi
 if [ "$OPT_STREAMING" = true ]; then
-    echo -e "  5. ${C_GREEN}sudo tailscale up${RESET} to join your tailnet (Apollo web UI on :47990)"
+    _next; echo -e "  $_step_n. ${C_GREEN}sudo tailscale up${RESET} to join your tailnet (Apollo web UI on :47990)"
 fi
-echo -e "  6. ${C_GREEN}sudo reboot${RESET} if you enabled SDDM"
+_next; echo -e "  $_step_n. ${C_GREEN}sudo reboot${RESET} if you enabled SDDM"
 
 # ==============================================================================
 # Debug summary — the last thing on screen, so a failure 40 minutes and 10,000

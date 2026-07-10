@@ -1,0 +1,83 @@
+# Alexandria audiobook (Qwen3-TTS) as a rootless Podman quadlet — provides the TTS
+# engine Athena/Hermes speaks with. Runs on the AMD GPU (ROCm) via the ROCm image
+# built by alexandria.build. NOTE: Qwen3-TTS needs ~3-4 GB VRAM, which does NOT
+# fit alongside the Gemma-4-26B server (it uses ~14.9 GB of 16 GB). Per your
+# workflow, swap Gemma to the 12B (or stop gemma.service) before using GPU TTS.
+#
+# FastAPI/uvicorn serves the API + web UI on :4200 (loopback only). The web studio
+# is at http://127.0.0.1:4200 ; the TTS endpoint Hermes will call is
+# POST /api/voice_design/preview.
+[Unit]
+Description=Alexandria audiobook TTS (Qwen3-TTS, CPU) — Athena's voice
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=alexandria.build
+ContainerName=alexandria
+AutoUpdate=local
+
+# Host networking: shares your loopback so Alexandria can reach the Gemma LLM on
+# 127.0.0.1:11434 (for audiobook script annotation) and the TTS shim can reach
+# Alexandria on 127.0.0.1:4200. Bind to loopback only (not LAN-exposed).
+Network=host
+Environment=ALEXANDRIA_HOST=127.0.0.1
+# Enable AOTriton flash/mem-efficient SDPA on RDNA4 (otherwise torch falls back to
+# the math path and warns).
+Environment=TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1
+# --- RDNA4 (gfx1200) Qwen3-TTS speedup, FULL QUALITY (bf16) ---
+# Stock bf16 RTF 3.5 -> ~2.3 with this tuning stack (measured on this card).
+# fp16 (ALEXANDRIA_FP16=1) shaved another ~10% (~2.0) but trades off dynamic
+# range/quality — per your call, this box stays on full-quality bf16
+# (ALEXANDRIA_FP16=0) and keeps only the lossless speed levers below. The
+# live/instant voice is Kokoro (:4231) instead; Alexandria is for on-demand
+# full-quality synthesis (studio/audiobooks), where ~2.3 RTF is fine.
+# TunableOp picks the fastest GEMM kernels (cache pre-warmed in the hfcache volume,
+# tunableop_bf16_*.csv — dtype-specific, don't reuse the fp16 cache here);
+# TUNING=0 so it only USES the cache (per-request re-tuning caused RTF spikes to ~9.5).
+# hipBLASLt > rocBLAS on RDNA4. Persistent MIOpen DB + FIND_MODE=2 stopped the
+# codec-conv re-search (the bimodal 2.5<->9.5 swings) — this benefit is dtype-independent.
+# (Codec torch.compile was WORSE on RDNA4 — inductor kernels are slow — so it's off.)
+# Re-tune after a model/torch change: run once with PYTORCH_TUNABLEOP_TUNING=1.
+Environment=ALEXANDRIA_FP16=0
+Environment=PYTORCH_TUNABLEOP_ENABLED=1
+Environment=PYTORCH_TUNABLEOP_TUNING=0
+# NB: %%d escapes to a literal %d for TunableOp's device-id substitution — a bare
+# %d is a systemd specifier (credentials dir) and silently breaks the cache path.
+Environment=PYTORCH_TUNABLEOP_FILENAME=/root/.cache/huggingface/tunableop_bf16_%%d.csv
+Environment=TORCH_BLAS_PREFER_HIPBLASLT=1
+Environment=MIOPEN_FIND_MODE=2
+Environment=MIOPEN_USER_DB_PATH=/root/.cache/huggingface/miopen
+Environment=MIOPEN_CUSTOM_CACHE_DIR=/root/.cache/huggingface/miopen
+
+# AMD GPU (ROCm) access for rootless Podman. The /dev/kfd + /dev/dri nodes are
+# mode 0666 on this host, so no render-group membership is needed; keep-groups
+# preserves the user's `video` group anyway. seccomp=unconfined matches the
+# working probe (some ROCm ioctls trip the default profile). This is the same
+# invocation that passed a real GPU matmul on the Navi 44 (gfx1200).
+AddDevice=/dev/kfd
+AddDevice=/dev/dri
+GroupAdd=keep-groups
+PodmanArgs=--security-opt=seccomp=unconfined
+
+# Upstream's Dockerfile forgets to COPY persona_prompts.txt (required at startup);
+# supply it from the repo read-only rather than forking the Dockerfile.
+Volume=%h/alexandria-audiobook/persona_prompts.txt:/alexandria/persona_prompts.txt:ro
+
+# Persist the ~3.5 GB Qwen3-TTS model cache and generated audio (named volumes
+# avoid rootless bind-mount UID headaches; the wavs are fetched over HTTP anyway).
+Volume=alexandria-hfcache:/root/.cache/huggingface
+Volume=alexandria-designed:/alexandria/designed_voices
+Volume=alexandria-clone:/alexandria/clone_voices
+# Finished audiobooks land in the Kavita library volume (~/Books), so Kavita can
+# serve them (point a Kavita library at ~/Books/Audiobooks). Read source books too.
+Volume=%h/Books/Audiobooks:/alexandria/voicelines:Z
+Volume=%h/Books:/library:ro,Z
+
+[Service]
+Restart=always
+# First start also builds the image (large CUDA base + deps) — allow lots of time.
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=default.target
