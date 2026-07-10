@@ -159,6 +159,27 @@ quadlet_start() {
     fi
 }
 
+# ── system units ──────────────────────────────────────────────────────────────
+# Enable a system unit and report what ACTUALLY happened. The old shape was
+#     sudo systemctl enable X >/dev/null 2>&1 || true
+#     printf "  -> X enabled [ OK ]"
+# which told the user NetworkManager was enabled whether or not it was — a
+# machine that boots without network, reported green.
+#
+# One unit per call, always. `systemctl enable A B` aborts the entire invocation
+# on the first failure, so a masked or misnamed unit silently takes the good ones
+# with it (exactly how hermes-gateway ended up disabled on every install).
+#
+#   svc_enable <unit> <label> [--now]
+svc_enable() {
+    local unit="$1" label="$2" now="${3:-}"
+    if sudo systemctl enable $now "$unit" >/dev/null 2>&1; then
+        _step_line "$label enabled" "$C_GREEN" " OK "
+    else
+        step_warn "$label not enabled" "systemctl status $unit"
+    fi
+}
+
 HEADLESS=false
 
 while [[ "$#" -gt 0 ]]; do
@@ -1073,7 +1094,18 @@ draw_header
 echo -e "${BOLD}${C_BLUE}::${RESET} ${BOLD}Starting Installation Process...${RESET}\n"
 
 echo -e "${C_CYAN}[ INFO ]${RESET} Requesting sudo privileges..."
-sudo -v
+# Stop here if it fails. sudo gives three tries, and pam_faillock (deny=3 on
+# Arch) locks the account on the third — at the greeter and the lock screen, not
+# just for sudo. Carrying on would run seventy more sudo calls against a locked
+# account, every one of them another failed authentication.
+if ! sudo -v; then
+    echo -e "\n${C_RED}[FAIL]${RESET} Could not obtain sudo. Nothing has been changed."
+    echo -e "If this was a mistyped password, your account may now be locked out"
+    echo -e "by pam_faillock. Check and clear it with:"
+    echo -e "  ${BOLD}faillock --user $USER${RESET}"
+    echo -e "  ${BOLD}sudo faillock --user $USER --reset${RESET}   (or wait 10 minutes)"
+    exit 1
+fi
 
 # Sudo keepalive.
 #
@@ -1542,11 +1574,16 @@ else
     # wallet. Add them there, keeping the '-' prefix so a later package
     # removal degrades instead of locking anyone out.
     if ! grep -q "pam_kwallet5" /etc/pam.d/login 2>/dev/null; then
-        sudo cp /etc/pam.d/login /etc/pam.d/login.bak-mercury 2>/dev/null || true
-        printf -- '-auth       optional    pam_kwallet5.so\n-session    optional    pam_kwallet5.so         auto_start\n' \
-            | sudo tee -a /etc/pam.d/login >/dev/null 2>&1 \
-            && printf "  -> pam_kwallet5 added to /etc/pam.d/login %-5s ${C_GREEN}[ OK ]${RESET}\n" "" \
-            || step_warn "could not add pam_kwallet5 to /etc/pam.d/login"
+        # No backup, no edit. A broken /etc/pam.d/login is no console login at
+        # all, and `|| true` on the backup would let the append proceed anyway.
+        if ! sudo cp /etc/pam.d/login /etc/pam.d/login.bak-mercury; then
+            step_warn "pam_kwallet5 not added to /etc/pam.d/login" "backup failed; file untouched"
+        elif printf -- '-auth       optional    pam_kwallet5.so\n-session    optional    pam_kwallet5.so         auto_start\n' \
+                | sudo tee -a /etc/pam.d/login >/dev/null; then
+            printf "  -> pam_kwallet5 added to /etc/pam.d/login %-5s ${C_GREEN}[ OK ]${RESET}\n" ""
+        else
+            step_warn "could not add pam_kwallet5 to /etc/pam.d/login"
+        fi
     fi
 fi
 
@@ -1562,17 +1599,26 @@ if pacman -Q gnome-keyring &>/dev/null; then
     done
     systemctl --user mask gnome-keyring-daemon.service gnome-keyring-daemon.socket >/dev/null 2>&1 || true
 
+    pam_edited=false
     for pamfile in /etc/pam.d/sddm /etc/pam.d/sddm-autologin /etc/pam.d/login; do
         [ -f "$pamfile" ] || continue
         grep -qE '^[^#]*pam_gnome_keyring' "$pamfile" 2>/dev/null || continue
-        sudo cp "$pamfile" "$pamfile.bak-mercury" 2>/dev/null || true
-        sudo sed -i -E 's|^([^#]*pam_gnome_keyring.*)$|# disabled by mercury-dots (KWallet owns the Secret Service): \1|' \
-            "$pamfile" 2>/dev/null \
-            && printf "  -> pam_gnome_keyring disabled in %-14s %-1s ${C_GREEN}[ OK ]${RESET}\n" "$(basename "$pamfile")" "" \
-            || step_warn "could not disable pam_gnome_keyring in $pamfile"
+        # The backup is a precondition, not a courtesy: sed -i rewrites the file
+        # in place, and these files gate every login on the machine.
+        if ! sudo cp "$pamfile" "$pamfile.bak-mercury"; then
+            step_warn "pam_gnome_keyring left enabled in $(basename "$pamfile")" "backup failed; file untouched"
+        elif sudo sed -i -E 's|^([^#]*pam_gnome_keyring.*)$|# disabled by mercury-dots (KWallet owns the Secret Service): \1|' \
+                "$pamfile"; then
+            printf "  -> pam_gnome_keyring disabled in %-14s %-1s ${C_GREEN}[ OK ]${RESET}\n" "$(basename "$pamfile")" ""
+            pam_edited=true
+        else
+            step_warn "could not disable pam_gnome_keyring in $pamfile"
+        fi
     done
-    echo -e "  -> ${DIM}Backups at *.bak-mercury. Existing gnome-keyring secrets:"
-    echo -e "     run scripts/keyring_migrate.sh BEFORE logging out.${RESET}"
+    if [ "$pam_edited" = true ]; then
+        echo -e "  -> ${DIM}Backups at *.bak-mercury. Existing gnome-keyring secrets:"
+        echo -e "     run scripts/keyring_migrate.sh BEFORE logging out.${RESET}"
+    fi
 fi
 echo -e "  ${DIM}Store API tokens with: $HYPR_DIR/scripts/secrets.sh set <key> <value>${RESET}"
 echo -e "  ${DIM}List known keys with:  $HYPR_DIR/scripts/secrets.sh list${RESET}"
@@ -1678,15 +1724,16 @@ fi
 
 # --- Core services ---
 echo -e "\n${C_CYAN}[ INFO ]${RESET} Enabling core services..."
-sudo systemctl enable NetworkManager.service >/dev/null 2>&1 || true
-printf "  -> NetworkManager enabled %-23s ${C_GREEN}[ OK ]${RESET}\n" ""
-sudo systemctl enable --now power-profiles-daemon.service 2>/dev/null || true
-printf "  -> Power Profiles Daemon enabled %-13s ${C_GREEN}[ OK ]${RESET}\n" ""
-sudo systemctl enable --now bluetooth.service 2>/dev/null || true
-printf "  -> Bluetooth enabled %-29s ${C_GREEN}[ OK ]${RESET}\n" ""
-sudo systemctl enable --now swayosd-libinput-backend.service 2>/dev/null || true
-printf "  -> SwayOSD libinput backend enabled %-12s ${C_GREEN}[ OK ]${RESET}\n" ""
-sudo systemctl --global enable pipewire wireplumber pipewire-pulse 2>/dev/null || true
+svc_enable NetworkManager.service            "NetworkManager"
+svc_enable power-profiles-daemon.service     "Power Profiles Daemon"     --now
+svc_enable bluetooth.service                 "Bluetooth"                 --now
+svc_enable swayosd-libinput-backend.service  "SwayOSD libinput backend"  --now
+# --global enables for every user's session manager. One at a time, same reason
+# as above: the multi-unit form aborts on the first failure.
+for _u in pipewire wireplumber pipewire-pulse; do
+    sudo systemctl --global enable "$_u" >/dev/null 2>&1 \
+        || step_warn "$_u not enabled (--global)"
+done
 # (No easyeffects.service enable: the package stopped shipping a user unit, so
 #  the call was a silent no-op. EasyEffects is launched from its own autostart
 #  entry when the user wants it; nothing in this DE depends on it running.)
@@ -1719,10 +1766,16 @@ if [ "$OPT_CONTAINERS" = true ]; then
     # layer, which there means every image on the machine.
     echo -e "  -> ${DIM}Storage repair tool: scripts/podman_relink.sh --dry-run${RESET}"
 
-    # User lingering — user services persist across login/logout
+    # User lingering — user services persist across login/logout. Without it,
+    # honcho, gemma and hermes-vision die on logout and never start at boot; the
+    # old `|| true` said nothing at all, so that surfaced days later as "my
+    # containers keep dying".
     if ! loginctl show-user "$USER" 2>/dev/null | grep -q "Linger=yes"; then
-        sudo loginctl enable-linger "$USER" 2>/dev/null && \
-            printf "  -> User lingering enabled %-21s ${C_GREEN}[ OK ]${RESET}\n" "" || true
+        if sudo loginctl enable-linger "$USER" 2>/dev/null; then
+            printf "  -> User lingering enabled %-21s ${C_GREEN}[ OK ]${RESET}\n" ""
+        else
+            step_warn "user lingering not enabled" "user services will not survive logout"
+        fi
     fi
 
     # ── Kavita (reading server for the books tab) ──
@@ -2510,9 +2563,14 @@ if [[ "$SETUP_SDDM_THEME" == true ]]; then
     THEME_REPO="https://github.com/Keyitdev/sddm-astronaut-theme.git"
 
     if [ -d "$THEME_DIR" ]; then
-        sudo git -C "$THEME_DIR" fetch --quiet origin master 2>/dev/null || true
-        sudo git -C "$THEME_DIR" reset --hard origin/master 2>/dev/null || true
-        printf "  -> Astronaut theme updated %-19s ${C_GREEN}[ OK ]${RESET}\n" ""
+        # An unreachable remote or a dirty tree is not fatal — the theme already
+        # on disk still works — but it must not be reported as "updated".
+        if sudo git -C "$THEME_DIR" fetch --quiet origin master 2>/dev/null \
+                && sudo git -C "$THEME_DIR" reset --hard origin/master >/dev/null 2>&1; then
+            printf "  -> Astronaut theme updated %-19s ${C_GREEN}[ OK ]${RESET}\n" ""
+        else
+            step_warn "Astronaut theme not updated" "using the existing checkout"
+        fi
     else
         if sudo git clone --depth 1 -b master "$THEME_REPO" "$THEME_DIR" 2>&1 | tail -2; then
             printf "  -> Astronaut theme cloned %-21s ${C_GREEN}[ OK ]${RESET}\n" ""
@@ -2529,9 +2587,12 @@ if [[ "$SETUP_SDDM_THEME" == true ]]; then
     if [ -f "$THEME_DIR/Themes/${THEME_VARIANT}.conf" ]; then
         sudo sed -i "s|^ConfigFile=.*|ConfigFile=Themes/${THEME_VARIANT}.conf|" "$THEME_DIR/metadata.desktop" 2>/dev/null
         VARIANT_CONF="$THEME_DIR/Themes/${THEME_VARIANT}.conf"
-        sudo sed -i "s|^HideSessions=.*|HideSessions=false|" "$VARIANT_CONF" 2>/dev/null || true
-        sudo sed -i "s|^ShowSessionsButton=.*|ShowSessionsButton=true|" "$VARIANT_CONF" 2>/dev/null || true
-        printf "  -> Variant set: $THEME_VARIANT %-25s ${C_GREEN}[ OK ]${RESET}\n" ""
+        if sudo sed -i "s|^HideSessions=.*|HideSessions=false|" "$VARIANT_CONF" 2>/dev/null \
+                && sudo sed -i "s|^ShowSessionsButton=.*|ShowSessionsButton=true|" "$VARIANT_CONF" 2>/dev/null; then
+            printf "  -> Variant set: $THEME_VARIANT %-25s ${C_GREEN}[ OK ]${RESET}\n" ""
+        else
+            step_warn "SDDM variant not fully configured" "$VARIANT_CONF"
+        fi
     elif [ -d "$THEME_DIR/Themes" ]; then
         first=$(ls "$THEME_DIR/Themes/" 2>/dev/null | grep '\.conf$' | head -1 | sed 's/\.conf$//')
         if [ -n "$first" ]; then
