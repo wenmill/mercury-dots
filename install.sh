@@ -1625,60 +1625,39 @@ if [ -f "$PIP_BUILD" ]; then
     fi
 fi
 
-# hyprbars plugin via hyprpm (float-mode title bars).
+# hyprbars plugin via hyprpm — https://wiki.hypr.land/Plugins/Using-Plugins/
 #
-# `hyprpm enable` needs a live Hyprland instance to load the plugin into, so this
-# can only ever succeed when the installer is run from inside a session — from a
-# TTY it always fails. Rather than warn and leave the user to remember a command,
-# scripts/hyprpm_ensure.sh runs from autostart and finishes the job at first
-# graphical login. Everything here is best-effort; stdin closed and timed out,
-# because `hyprpm add` compiles against Hyprland's headers and can take minutes.
-HYPRPM_LOG="/tmp/hyprpm-install.log"
+# The installer cannot do this, and never could. Two independent reasons:
+#
+#  1. hyprpm asks the RUNNING compositor for its version, so it can build the
+#     plugin against matching headers. With no Hyprland up, even `add` dies:
+#         ✖ failed to get the current hyprland version. Are you running hyprland?
+#     The recommended install path is a TTY, so this never once succeeded here.
+#
+#  2. hyprpm writes its state to /var/cache/hyprpm/<user> as root, through
+#     `sudo install -m644 -o0 -g0 ...` (hyprpm/src/helpers/Sys.cpp). `add`,
+#     `enable` and `update` all prompt for a password. Piping them to a log,
+#     as this step used to, turns that prompt into "Failed to write plugin state".
+#
+# So: install the build dependencies the wiki lists (cpio, cmake, git, meson,
+# gcc — gcc comes with base-devel), and leave the rest to scripts/hyprpm_ensure.sh,
+# which runs from autostart inside a session and opens a terminal for the sudo
+# prompt the first time. `hyprpm reload` needs no root and runs every login.
 if command -v hyprpm &>/dev/null; then
-    : > "$HYPRPM_LOG"
-
-    # Fetching and building the plugin does NOT need a running compositor — only
-    # `enable`/`reload` do. So do the slow part now, and log it. Sending this to
-    # /dev/null (as it once did) meant a failed download looked identical to a
-    # successful one, and hyprbars simply never appeared with nothing to read.
-    echo "  -> Fetching Hyprland headers + plugins (compiles; can take minutes)..."
-    timeout 900 hyprpm update </dev/null >>"$HYPRPM_LOG" 2>&1 || true
-
-    # `hyprpm list` names every plugin in every added repo whether it is on or
-    # off, so grepping for the plugin name only tells us the REPO is present.
-    hyprpm_state() {
-        timeout 60 hyprpm list 2>/dev/null </dev/null | sed 's/\x1b\[[0-9;]*m//g' \
-            | awk '$0 ~ /Plugin hyprbars$/ { f = 1; next } f && /enabled:/ { print $NF; exit }'
-    }
-
-    if [ -z "$(hyprpm_state)" ]; then
-        timeout 900 hyprpm add https://github.com/hyprwm/hyprland-plugins \
-            </dev/null >>"$HYPRPM_LOG" 2>&1 || true
+    hyprpm_missing=""
+    for _dep in cpio cmake git meson gcc; do
+        command -v "$_dep" &>/dev/null || hyprpm_missing="$hyprpm_missing $_dep"
+    done
+    if [ -n "$hyprpm_missing" ]; then
+        step_warn "hyprbars build deps missing:$hyprpm_missing" "hyprbars will not build"
+    else
+        printf "  -> hyprbars deferred to first login %-12s ${C_GREEN}[ OK ]${RESET}\n" ""
+        echo -e "     ${DIM}hyprpm needs a running Hyprland and a sudo password, so it cannot"
+        echo -e "     run from here. hyprpm_ensure.sh (autostart) opens a terminal once."
+        echo -e "     Manually, inside a session:"
+        echo -e "       ${BOLD}hyprpm update && hyprpm add https://github.com/hyprwm/hyprland-plugins${RESET}${DIM}"
+        echo -e "       ${BOLD}hyprpm enable hyprbars && hyprpm reload -n${RESET}${DIM}"
     fi
-
-    case "$(hyprpm_state)" in
-        "")
-            # The repo still is not there: the clone or the build failed. This is
-            # the one outcome the user must hear about — hyprpm_ensure.sh will
-            # retry at login, but if the build is broken it will fail there too.
-            step_warn "hyprbars not downloaded" "see $HYPRPM_LOG"
-            ;;
-        true)
-            printf "  -> hyprbars enabled (hyprpm) %-19s ${C_GREEN}[ OK ]${RESET}\n" ""
-            ;;
-        false)
-            # Downloaded and built, but not switched on: `hyprpm enable` needs a
-            # live instance to load into, which a TTY install does not have.
-            # Try anyway (harmless inside a session), then leave it to autostart.
-            if timeout 120 hyprpm enable hyprbars </dev/null >>"$HYPRPM_LOG" 2>&1 \
-                    && [ "$(hyprpm_state)" = "true" ]; then
-                printf "  -> hyprbars enabled (hyprpm) %-19s ${C_GREEN}[ OK ]${RESET}\n" ""
-            else
-                printf "  -> hyprbars built, enabled at login %-12s ${C_GREEN}[ OK ]${RESET}\n" ""
-                echo -e "  -> ${DIM}hyprpm enable needs a running Hyprland; hyprpm_ensure.sh does it${RESET}"
-            fi
-            ;;
-    esac
 fi
 
 # (mov-cli retired — upstream deprecated. Movies/TV use lobster, with the
