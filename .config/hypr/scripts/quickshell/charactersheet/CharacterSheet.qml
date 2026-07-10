@@ -64,10 +64,9 @@ Item {
     readonly property var movement: st.trackers.movement
     readonly property string workoutFocus: Engine.workoutFocusLabel(st)
     readonly property color heartRed: "#9E2C31"
-    // Veins: hidden unless the group was trained; red pump on the day, blue in
-    // recovery, gone after a missed day.
-    function veinColor(group) { return Engine.veinState(st, group).mode === "recovery" ? blue : heartRed; }
-    function veinIntensity(group) { var v = Engine.veinState(st, group); return v.show ? v.intensity : 0; }
+    // Vein overlays on the arms and legs were removed; the limbs now render as the
+    // plain outline. Engine.veinState() is left in LifeOsEngine.js — it is pure and
+    // may still be useful — but nothing in the QML calls it any more.
     readonly property int resilience: Engine.resilienceIndex(st)
     readonly property int sleepQ: Engine.sleepQuality(st)
     readonly property int stress: Engine.stressLevel(st)
@@ -416,50 +415,6 @@ Item {
                 ctx.globalAlpha = 1.0;
                 ctx.strokeStyle = adrenal.tint;
                 ctx.lineWidth = Math.max(1, w * 0.08);
-                ctx.stroke();
-            }
-        }
-    }
-
-    // ── Popping veins: a branching vein pattern that fades in with the amount
-    //    a limb was trained today (0 = invisible). ─────────────────────────────
-    Component {
-        id: veinComponent
-        Canvas {
-            id: vein
-            property real intensity: 0        // 0..1 pump level
-            property color tint: window.teal
-            property bool flip: false
-            opacity: Math.max(0, Math.min(1, intensity))
-            Behavior on opacity { NumberAnimation { duration: 300 } }
-            onIntensityChanged: requestPaint()
-            onTintChanged: requestPaint()
-            onWidthChanged: requestPaint()
-            onHeightChanged: requestPaint()
-            Component.onCompleted: requestPaint()
-            onPaint: {
-                var ctx = getContext("2d"); ctx.reset();
-                var w = width, h = height;
-                if (flip) { ctx.translate(w, 0); ctx.scale(-1, 1); }
-                ctx.strokeStyle = tint;
-                ctx.lineCap = "round"; ctx.lineJoin = "round";
-                ctx.globalAlpha = 0.9;
-                // Main vessel running the length of the limb.
-                ctx.lineWidth = Math.max(1, w * 0.11);
-                ctx.beginPath();
-                ctx.moveTo(w * 0.42, h * 0.04);
-                ctx.bezierCurveTo(w * 0.60, h * 0.28, w * 0.40, h * 0.52, w * 0.55, h * 0.74);
-                ctx.bezierCurveTo(w * 0.62, h * 0.86, w * 0.52, h * 0.94, w * 0.48, h * 0.98);
-                ctx.stroke();
-                // Branches.
-                ctx.lineWidth = Math.max(1, w * 0.075);
-                ctx.beginPath();
-                ctx.moveTo(w * 0.50, h * 0.34);
-                ctx.bezierCurveTo(w * 0.70, h * 0.40, w * 0.80, h * 0.50, w * 0.86, h * 0.60);
-                ctx.stroke();
-                ctx.beginPath();
-                ctx.moveTo(w * 0.45, h * 0.60);
-                ctx.bezierCurveTo(w * 0.28, h * 0.66, w * 0.22, h * 0.78, w * 0.18, h * 0.90);
                 ctx.stroke();
             }
         }
@@ -1016,52 +971,6 @@ Item {
                                 onLoaded: {
                                     item.tint = Qt.binding(function () { return window.adrenalColor; });
                                 }
-                            }
-
-                            // Popping veins — biceps (both upper arms) show with arm
-                            // training, thighs with leg training, fading in by how much
-                            // each group was worked today.
-                            Loader {   // left bicep
-                                sourceComponent: veinComponent
-                                anchors.horizontalCenter: vitImg.horizontalCenter
-                                anchors.horizontalCenterOffset: -vitImg.paintedHeight * 0.12
-                                anchors.verticalCenter: vitImg.verticalCenter
-                                anchors.verticalCenterOffset: -vitImg.paintedHeight * 0.15
-                                width: Math.max(1, vitImg.paintedHeight * 0.065)
-                                height: Math.max(1, vitImg.paintedHeight * 0.078)
-                                rotation: 100
-                                onLoaded: { item.flip = true; item.tint = Qt.binding(function () { return window.veinColor("arms"); }); item.intensity = Qt.binding(function () { return window.veinIntensity("arms"); }); }
-                            }
-                            Loader {   // right bicep
-                                sourceComponent: veinComponent
-                                anchors.horizontalCenter: vitImg.horizontalCenter
-                                anchors.horizontalCenterOffset: vitImg.paintedHeight * 0.12
-                                anchors.verticalCenter: vitImg.verticalCenter
-                                anchors.verticalCenterOffset: -vitImg.paintedHeight * 0.15
-                                width: Math.max(1, vitImg.paintedHeight * 0.065)
-                                height: Math.max(1, vitImg.paintedHeight * 0.078)
-                                rotation: -100
-                                onLoaded: { item.tint = Qt.binding(function () { return window.veinColor("arms"); }); item.intensity = Qt.binding(function () { return window.veinIntensity("arms"); }); }
-                            }
-                            Loader {   // left thigh
-                                sourceComponent: veinComponent
-                                anchors.horizontalCenter: vitImg.horizontalCenter
-                                anchors.horizontalCenterOffset: -vitImg.paintedHeight * 0.04
-                                anchors.verticalCenter: vitImg.verticalCenter
-                                anchors.verticalCenterOffset: vitImg.paintedHeight * 0.145
-                                width: Math.max(1, vitImg.paintedHeight * 0.042)
-                                height: Math.max(1, vitImg.paintedHeight * 0.11)
-                                onLoaded: { item.flip = true; item.tint = Qt.binding(function () { return window.veinColor("legs"); }); item.intensity = Qt.binding(function () { return window.veinIntensity("legs"); }); }
-                            }
-                            Loader {   // right thigh
-                                sourceComponent: veinComponent
-                                anchors.horizontalCenter: vitImg.horizontalCenter
-                                anchors.horizontalCenterOffset: vitImg.paintedHeight * 0.04
-                                anchors.verticalCenter: vitImg.verticalCenter
-                                anchors.verticalCenterOffset: vitImg.paintedHeight * 0.145
-                                width: Math.max(1, vitImg.paintedHeight * 0.042)
-                                height: Math.max(1, vitImg.paintedHeight * 0.11)
-                                onLoaded: { item.tint = Qt.binding(function () { return window.veinColor("legs"); }); item.intensity = Qt.binding(function () { return window.veinIntensity("legs"); }); }
                             }
 
                             Image {
