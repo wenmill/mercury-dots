@@ -306,6 +306,24 @@ int main(int argc, char *argv[])
     }
     keyboardHelper.setWindow(win);
 
+    // Seed the input region BEFORE the surface maps. Otherwise the overlay maps
+    // full-width on the Overlay layer with no mask, and for the ~half-second
+    // until QML installs its own region the whole surface is input-opaque and
+    // swallows every click and pointer motion at login — the "mouse gets eaten
+    // at startup" bug. QML can't close the gap itself: its Component.onCompleted
+    // apply() runs before this platform window exists and is dropped, so the
+    // 500ms re-apply Timer is the first one that lands. Seed the same thin
+    // edge-trigger strips QML settles on — only a few px at the screen edges are
+    // ever input-active — through maskHelper so its dedup cache matches what's on
+    // the surface; QML then refines the exact geometry on its first tick (and,
+    // crucially, an empty passthrough region still differs from this and applies).
+    {
+        const int ew = 4;                       // ~s(3); QML refines it shortly
+        const int W = win->width(), H = win->height();
+        maskHelper.apply(QVariantList{
+            0, 0, ew, H,  W - ew, 0, ew, H,  0, H - ew, W, ew});
+    }
+
     win->setVisible(true);
     return app.exec();
 }
