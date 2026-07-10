@@ -273,7 +273,11 @@ ARCH_PKGS=(
     # preferred when present; zenity is the portable fallback.
     "zenity"
     # Media pipeline (movies widget video CLI, pip player, wallpapers)
-    "mpv" "mpvpaper" "ffmpeg" "yt-dlp" "imagemagick" "poppler"
+    # libva-mesa-driver: mpv pulls the VAAPI *loader* (libva) but never the
+    # backend driver, so without this it silently falls back to software decode.
+    # Kept here (not the skippable driver step) so the movies widget / PiP get
+    # GPU decode on AMD out of the box; unused-but-harmless on Intel/NVIDIA.
+    "mpv" "mpvpaper" "ffmpeg" "yt-dlp" "imagemagick" "poppler" "libva-mesa-driver"
     # Python + the Element/Matrix overlay host
     "python" "python-websockets" "python-pyqt6" "python-pyqt6-webengine"
     # Secrets: secrets.sh -> org.freedesktop.secrets, served by KWallet's
