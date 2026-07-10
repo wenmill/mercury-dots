@@ -29,20 +29,47 @@ command -v hyprpm >/dev/null 2>&1 || exit 0
 
 : > "$LOG"
 
-# Already enabled? Just make sure it is loaded into the running compositor.
-if hyprpm list 2>/dev/null | grep -q "$PLUGIN"; then
-    timeout 60 hyprpm reload </dev/null >>"$LOG" 2>&1 || true
-    exit 0
-fi
+# `hyprpm list` prints every plugin in every added repo, enabled or not:
+#
+#     │ Plugin hyprbars
+#     └─ enabled: false
+#
+# so `hyprpm list | grep -q hyprbars` is true for a plugin that is present and
+# switched OFF. Read the enabled flag itself. Prints "true", "false", or nothing
+# when the repo was never added. (The sed strips hyprpm's colour codes, which
+# otherwise land in the middle of the value.)
+plugin_state() {
+    timeout 60 hyprpm list 2>/dev/null </dev/null \
+        | sed 's/\x1b\[[0-9;]*m//g' \
+        | awk -v p="$PLUGIN" '
+            $0 ~ ("Plugin " p "$") { f = 1; next }
+            f && /enabled:/          { print $NF; exit }'
+}
 
-# Headers first: `add` needs them, and `update` is what fetches them.
-timeout "$BUILD_TIMEOUT" hyprpm update </dev/null >>"$LOG" 2>&1 || true
-timeout "$BUILD_TIMEOUT" hyprpm add "$REPO" </dev/null >>"$LOG" 2>&1 || true
+case "$(plugin_state)" in
+    true)
+        # Present and enabled: just make sure it is loaded into this compositor.
+        timeout 60 hyprpm reload </dev/null >>"$LOG" 2>&1 || true
+        exit 0
+        ;;
+    false)
+        # Repo added, plugin off — the state install.sh leaves behind when it
+        # runs from a TTY, where `hyprpm enable` has no instance to load into.
+        # No rebuild needed, just flip it on.
+        ;;
+    *)
+        # Repo never added. Headers first: `add` needs them, `update` fetches
+        # them, and both compile against Hyprland — hence the long timeout.
+        timeout "$BUILD_TIMEOUT" hyprpm update </dev/null >>"$LOG" 2>&1 || true
+        timeout "$BUILD_TIMEOUT" hyprpm add "$REPO" </dev/null >>"$LOG" 2>&1 || true
+        ;;
+esac
 
-if timeout 120 hyprpm enable "$PLUGIN" </dev/null >>"$LOG" 2>&1; then
+if timeout 120 hyprpm enable "$PLUGIN" </dev/null >>"$LOG" 2>&1 \
+        && [ "$(plugin_state)" = "true" ]; then
     timeout 60 hyprpm reload </dev/null >>"$LOG" 2>&1 || true
-    notify-send "Hyprland plugins" "hyprbars enabled" 2>/dev/null || true
+    notify-send "Hyprland plugins" "$PLUGIN enabled" 2>/dev/null || true
 else
     notify-send -u critical "Hyprland plugins" \
-        "hyprbars could not be enabled — see $LOG" 2>/dev/null || true
+        "$PLUGIN could not be enabled — see $LOG" 2>/dev/null || true
 fi

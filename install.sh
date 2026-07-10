@@ -1633,16 +1633,52 @@ fi
 # scripts/hyprpm_ensure.sh runs from autostart and finishes the job at first
 # graphical login. Everything here is best-effort; stdin closed and timed out,
 # because `hyprpm add` compiles against Hyprland's headers and can take minutes.
+HYPRPM_LOG="/tmp/hyprpm-install.log"
 if command -v hyprpm &>/dev/null; then
-    timeout 900 hyprpm update </dev/null >/dev/null 2>&1 || true
-    hyprpm list 2>/dev/null | grep -q hyprbars || \
-        timeout 900 hyprpm add https://github.com/hyprwm/hyprland-plugins </dev/null >/dev/null 2>&1 || true
-    if timeout 120 hyprpm enable hyprbars </dev/null >/dev/null 2>&1; then
-        printf "  -> hyprbars enabled (hyprpm) %-19s ${C_GREEN}[ OK ]${RESET}\n" ""
-    else
-        printf "  -> hyprbars deferred to first login %-12s ${C_GREEN}[ OK ]${RESET}\n" ""
-        echo -e "  -> ${DIM}hyprpm needs a running Hyprland; hyprpm_ensure.sh enables it at login${RESET}"
+    : > "$HYPRPM_LOG"
+
+    # Fetching and building the plugin does NOT need a running compositor — only
+    # `enable`/`reload` do. So do the slow part now, and log it. Sending this to
+    # /dev/null (as it once did) meant a failed download looked identical to a
+    # successful one, and hyprbars simply never appeared with nothing to read.
+    echo "  -> Fetching Hyprland headers + plugins (compiles; can take minutes)..."
+    timeout 900 hyprpm update </dev/null >>"$HYPRPM_LOG" 2>&1 || true
+
+    # `hyprpm list` names every plugin in every added repo whether it is on or
+    # off, so grepping for the plugin name only tells us the REPO is present.
+    hyprpm_state() {
+        timeout 60 hyprpm list 2>/dev/null </dev/null | sed 's/\x1b\[[0-9;]*m//g' \
+            | awk '$0 ~ /Plugin hyprbars$/ { f = 1; next } f && /enabled:/ { print $NF; exit }'
+    }
+
+    if [ -z "$(hyprpm_state)" ]; then
+        timeout 900 hyprpm add https://github.com/hyprwm/hyprland-plugins \
+            </dev/null >>"$HYPRPM_LOG" 2>&1 || true
     fi
+
+    case "$(hyprpm_state)" in
+        "")
+            # The repo still is not there: the clone or the build failed. This is
+            # the one outcome the user must hear about — hyprpm_ensure.sh will
+            # retry at login, but if the build is broken it will fail there too.
+            step_warn "hyprbars not downloaded" "see $HYPRPM_LOG"
+            ;;
+        true)
+            printf "  -> hyprbars enabled (hyprpm) %-19s ${C_GREEN}[ OK ]${RESET}\n" ""
+            ;;
+        false)
+            # Downloaded and built, but not switched on: `hyprpm enable` needs a
+            # live instance to load into, which a TTY install does not have.
+            # Try anyway (harmless inside a session), then leave it to autostart.
+            if timeout 120 hyprpm enable hyprbars </dev/null >>"$HYPRPM_LOG" 2>&1 \
+                    && [ "$(hyprpm_state)" = "true" ]; then
+                printf "  -> hyprbars enabled (hyprpm) %-19s ${C_GREEN}[ OK ]${RESET}\n" ""
+            else
+                printf "  -> hyprbars built, enabled at login %-12s ${C_GREEN}[ OK ]${RESET}\n" ""
+                echo -e "  -> ${DIM}hyprpm enable needs a running Hyprland; hyprpm_ensure.sh does it${RESET}"
+            fi
+            ;;
+    esac
 fi
 
 # (mov-cli retired — upstream deprecated. Movies/TV use lobster, with the
