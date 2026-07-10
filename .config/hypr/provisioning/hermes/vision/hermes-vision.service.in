@@ -1,7 +1,16 @@
 [Unit]
 Description=hermes-vision — screen-memory feed (gemma vision → honcho)
-After=graphical-session.target honcho.service
-PartOf=graphical-session.target
+# gemma.service is the local llama.cpp server on :11434; honcho.service is the
+# podman-compose memory stack on :8000. Neither is created by install.sh, so on
+# a fresh machine both are absent — which is fine and deliberate:
+#   After=  on a unit that does not exist is a no-op.
+#   Wants=  on a unit that does not exist logs "not found" and carries on.
+# Where they DO exist, this orders vision behind the model and the memory store
+# instead of racing them at login. The daemon tolerates both being down anyway:
+# HERMES_VISION_LLM / HONCHO_URL are just HTTP endpoints, a failed call is
+# retried, and Restart=on-failure covers a hard exit.
+After=graphical-session.target gemma.service honcho.service
+Wants=gemma.service
 
 [Service]
 # Batch mode: buffer keyframes in memory and send them to gemma as ONE
