@@ -139,6 +139,13 @@ Window {
     // x/y stays disabled and the selector snaps open instead of sliding in next
     // time you reach the edge. (Verbatim from Floating.qml's onIsSidebarVisibleChanged.)
     onIsSidebarVisibleChanged: {
+        // Keyboard focus follows the panel, and nothing else. The surface maps
+        // with KeyboardInteractivityNone (see main.cpp's KeyboardHelper), so at
+        // login — when no window holds focus yet — it cannot swallow keystrokes
+        // before it has ever been opened. Raise it while the panel is up; drop
+        // it on close so the keyboard goes straight back to the focused window.
+        kb.setInteractive(isSidebarVisible);
+
         if (!isSidebarVisible) {
             keepCentered = false;
         } else {

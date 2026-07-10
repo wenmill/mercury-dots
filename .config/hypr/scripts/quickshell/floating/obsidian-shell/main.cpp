@@ -13,6 +13,7 @@
 //                (replaces Quickshell's declarative `mask: Region{}`)
 //   qsColors   — the live matugen palette (same qs_colors.json the shell reads)
 
+#include <optional>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -87,6 +88,52 @@ public:
 private:
     QQuickWindow *m_win = nullptr;
     QRegion m_last;
+};
+
+// Keyboard focus for the layer surface, driven from QML.
+//
+// The panel is an overlay that spends almost all of its life invisible and
+// click-through, so it must not hold keyboard focus while idle. LayerShellQt
+// defaults activateOnShow to true ("Normally, you want this enabled"), which is
+// wrong here: combined with a keyboard-interactive surface, the panel asks the
+// compositor for focus the moment it maps. At login nothing else holds focus,
+// so it gets it, and every keystroke vanishes into a hidden WebEngine until the
+// user peeks the selector and focus moves elsewhere.
+//
+// The surface therefore maps with KeyboardInteractivityNone and activateOnShow
+// off, and QML raises it only while the expanded panel is on screen — the one
+// state in which anything here wants typing.
+class KeyboardHelper : public QObject {
+    Q_OBJECT
+public:
+    // QML runs during engine.load(), before main() has a window to hand us — the
+    // same ordering the input-mask code works around. A command already sitting
+    // in the cmdfile therefore opens the panel before setWindow(), so remember
+    // what was asked for and apply it the moment the window arrives.
+    void setWindow(QWindow *w) {
+        m_win = w;
+        if (m_pending) { bool want = *m_pending; m_pending.reset(); setInteractive(want); }
+    }
+    // Exclusive, not OnDemand, while the panel is open. OnDemand only hands the
+    // keyboard over when the surface is CLICKED — verified against Hyprland: no
+    // `activelayer` event fires when the panel is opened from its keybind — so
+    // typing would silently go to the window underneath. Exclusive takes the
+    // keyboard for as long as the panel is up, which is what an open notes/chat
+    // panel wants, and None gives it straight back on close.
+    Q_INVOKABLE void setInteractive(bool on) {
+        if (!m_win) { m_pending = on; return; }
+        if (on == m_last) return;
+        if (auto *ls = LayerShellQt::Window::get(m_win)) {
+            ls->setKeyboardInteractivity(
+                on ? LayerShellQt::Window::KeyboardInteractivityExclusive
+                   : LayerShellQt::Window::KeyboardInteractivityNone);
+            m_last = on;
+        }
+    }
+private:
+    QWindow *m_win = nullptr;
+    bool m_last = false;                 // matches the None we map with
+    std::optional<bool> m_pending;       // requested before the window existed
 };
 
 // Watch the layer surface for the compositor pointer entering/leaving its input
@@ -202,10 +249,12 @@ int main(int argc, char *argv[])
     QQmlApplicationEngine engine;
     Sh sh;
     MaskHelper maskHelper;
+    KeyboardHelper keyboardHelper;
     SurfaceWatch surfaceWatch;
     FileWatch cmdWatch, passWatch;
     engine.rootContext()->setContextProperty("sh", &sh);
     engine.rootContext()->setContextProperty("maskHelper", &maskHelper);
+    engine.rootContext()->setContextProperty("kb", &keyboardHelper);
     engine.rootContext()->setContextProperty("surfaceWatch", &surfaceWatch);
     engine.rootContext()->setContextProperty("cmdWatch", &cmdWatch);
     engine.rootContext()->setContextProperty("passWatch", &passWatch);
@@ -245,9 +294,17 @@ int main(int argc, char *argv[])
             LayerShellQt::Window::AnchorLeft |
             LayerShellQt::Window::AnchorRight));
         ls->setExclusiveZone(0);  // overlay; reserve no screen space
+        // Map without the keyboard. QML raises this to OnDemand while the
+        // expanded panel is up; see KeyboardHelper.
         ls->setKeyboardInteractivity(
-            LayerShellQt::Window::KeyboardInteractivityOnDemand);
+            LayerShellQt::Window::KeyboardInteractivityNone);
+        // ...and do not requestActivate on show. LayerShellQt defaults this to
+        // true ("Normally, you want this enabled"), which is wrong for a mostly
+        // invisible overlay: at login nothing else holds focus, so the panel
+        // takes it and swallows every keystroke.
+        ls->setActivateOnShow(false);
     }
+    keyboardHelper.setWindow(win);
 
     win->setVisible(true);
     return app.exec();
