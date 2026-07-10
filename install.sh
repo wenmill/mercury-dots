@@ -1658,6 +1658,13 @@ if [ "$OPT_CONTAINERS" = true ]; then
     systemctl --user enable podman-restart.service >/dev/null 2>&1 && \
         printf "  -> podman-restart enabled (survives reboot) %-3s ${C_GREEN}[ OK ]${RESET}\n" ""
 
+    # If podman ever reports hundreds of "Damaged layer ... readlink overlay/l/..."
+    # errors, its short-name symlinks were lost, not its data. scripts/podman_relink.sh
+    # rebuilds them from each layer's own `link` file. Do NOT run
+    # `podman system check --repair` in that state — it deletes every damaged
+    # layer, which there means every image on the machine.
+    echo -e "  -> ${DIM}Storage repair tool: scripts/podman_relink.sh --dry-run${RESET}"
+
     # User lingering — user services persist across login/logout
     if ! loginctl show-user "$USER" 2>/dev/null | grep -q "Linger=yes"; then
         sudo loginctl enable-linger "$USER" 2>/dev/null && \
@@ -2190,6 +2197,32 @@ if [ "$OPT_HERMES" = true ]; then
         mkdir -p "$HOME/.config/systemd/user"
         sed -e "s|__HOME__|$HOME|g" \
             "$PROV/hermes-gateway.service.in" > "$HOME/.config/systemd/user/hermes-gateway.service"
+
+        # 2b) hermes-vision — the screen-memory feed that replaced screenpipe.
+        # Captures on focus/heartbeat, gates on idle/gaming/fullscreen and an
+        # ignore list (password managers, polkit, games), dedups with a
+        # perceptual hash, then batches keyframes into ONE gemma call per window
+        # and files the summary in honcho. Nothing screen-derived touches disk:
+        # grim's PNG is deleted the moment it is encoded.
+        if [ -d "$PROV/vision" ]; then
+            mkdir -p "$HOME/.hermes/bin" "$HOME/.config/systemd/user"
+            cp "$PROV/vision/hermes-vision.py" "$PROV/vision/hermes-vision-consolidate.py" \
+               "$PROV/vision/vision-ignore-refresh.sh" "$PROV/vision/vision-shot.sh" \
+               "$HOME/.hermes/bin/" 2>/dev/null
+            chmod +x "$HOME/.hermes/bin/hermes-vision.py" "$HOME/.hermes/bin/hermes-vision-consolidate.py" \
+                     "$HOME/.hermes/bin/vision-ignore-refresh.sh" "$HOME/.hermes/bin/vision-shot.sh" 2>/dev/null
+            # %h in the unit resolves to $HOME at runtime, so nothing to template.
+            cp "$PROV/vision/hermes-vision.service.in" \
+               "$HOME/.config/systemd/user/hermes-vision.service"
+            systemctl --user daemon-reload 2>/dev/null || true
+            if systemctl --user enable hermes-vision.service >/dev/null 2>&1; then
+                printf "  -> hermes-vision installed (batched) %-10s ${C_GREEN}[ OK ]${RESET}\n" ""
+            else
+                step_warn "hermes-vision not enabled" "systemctl --user enable hermes-vision"
+            fi
+        else
+            step_warn "provisioning/hermes/vision missing" "screen memory not installed"
+        fi
 
         # 3) ~/.hermes/.env — non-secret template + generated secrets appended
         mkdir -p "$HOME/.hermes"

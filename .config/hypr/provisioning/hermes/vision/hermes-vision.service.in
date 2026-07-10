@@ -1,0 +1,33 @@
+[Unit]
+Description=hermes-vision — screen-memory feed (gemma vision → honcho)
+After=graphical-session.target honcho.service
+PartOf=graphical-session.target
+
+[Service]
+# Batch mode: buffer keyframes in memory and send them to gemma as ONE
+# multi-image request per window, instead of one call per frame. The vision
+# encoder amortises across images — measured at 1280px on an RX 9060 XT:
+# 1 frame 1.9s, 2 frames 3.5s, 4 frames 4.0s, 8 frames 4.8s. Eight batched
+# frames therefore cost ~4.8s against ~15.2s taken one at a time.
+#
+# Frames live in RAM only; the PNG grim writes is deleted as soon as it is
+# encoded, so nothing screen-derived is ever persisted to disk.
+#
+# Set HERMES_VISION_BATCH_WINDOW=0 to restore one gemma call per frame.
+Environment=HERMES_VISION_BATCH_WINDOW=900
+Environment=HERMES_VISION_BATCH_MAX=8
+Type=simple
+# grim needs a live WAYLAND_DISPLAY. systemd's activation-time environment
+# snapshot can predate uwsm importing it, so read it from the live user manager
+# at exec time and wait for the socket before starting the daemon.
+ExecStart=/bin/sh -c 'for i in $(seq 1 60); do WD="$(systemctl --user show-environment | sed -n "s/^WAYLAND_DISPLAY=//p")"; if [ -n "$WD" ] && [ -S "$XDG_RUNTIME_DIR/$WD" ]; then break; fi; sleep 1; done; export WAYLAND_DISPLAY="$WD"; echo "hermes-vision: WAYLAND_DISPLAY=$WD"; exec python3 %h/.hermes/bin/hermes-vision.py'
+Restart=on-failure
+RestartSec=10
+# The daemon itself is light (grim + base64 + http); the heavy work is gemma on
+# the GPU. A modest nice + a CPU ceiling keep even a bad loop from competing
+# with interactive work.
+Nice=5
+CPUQuota=200%
+
+[Install]
+WantedBy=graphical-session.target
