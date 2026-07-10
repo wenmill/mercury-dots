@@ -1075,8 +1075,21 @@ echo -e "${BOLD}${C_BLUE}::${RESET} ${BOLD}Starting Installation Process...${RES
 echo -e "${C_CYAN}[ INFO ]${RESET} Requesting sudo privileges..."
 sudo -v
 
-# Sudo keepalive
-( while true; do sudo -n true 2>/dev/null; sleep 60; kill -0 "$$" 2>/dev/null || exit; done ) &
+# Sudo keepalive.
+#
+# `while sudo -n true`, not `while true; do sudo -n true`. With a valid timestamp
+# `sudo -n` refreshes it without authenticating. Without one — the prompt above
+# was cancelled, or sudoers sets timestamp_timeout=0 — sudo runs the PAM stack
+# with a conversation that cannot ask anything, and PAM records a failed auth:
+#
+#     sudo: pam_unix(sudo:auth): conversation failed
+#
+# pam_faillock counts those; Arch wires it into system-auth with deny=3. The old
+# loop retried once a minute for the length of the install with 2>/dev/null over
+# the evidence: three minutes to lock the user out of their own account — greeter
+# and lock screen included — halfway through an install. Leaving the loop on the
+# first failure caps the damage at one.
+( while sudo -n true 2>/dev/null; do sleep 60; kill -0 "$$" 2>/dev/null || exit; done ) &
 SUDO_PID=$!
 trap 'kill $SUDO_PID 2>/dev/null || true' EXIT
 
