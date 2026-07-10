@@ -1,0 +1,29 @@
+[Unit]
+Description=Honcho memory stack (api + deriver + pg + redis) via compose
+# gemma.service is the local model server hermes-vision and Hermes talk to. It
+# is not created by install.sh unless you also provision the model (see
+# provisioning/gemma), so on most machines it is simply absent: After= on a
+# missing unit is a no-op, and Wants= on one logs "not found" and carries on.
+After=network-online.target gemma.service podman.socket
+Wants=gemma.service podman.socket
+
+[Service]
+# docker-compose (the Python one) talks to podman through its socket. Harmless
+# when __COMPOSE__ is podman-compose, which ignores it.
+Environment=DOCKER_HOST=unix:///run/user/%U/podman/podman.sock
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=__HONCHO_DIR__
+# Containers that start before DNS is usable fail their first pulls. Wait for a
+# non-empty resolv.conf, but never block boot on it.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -s /etc/resolv.conf ] && exit 0; sleep 1; done; exit 0'
+# -p honcho pins the compose project name. The compose file has no `name:` key,
+# so the project would otherwise be derived from the directory — and different
+# compose implementations derive different container names from it
+# (honcho-database-1 vs honcho_database_1). Two projects then fight over
+# 127.0.0.1:5432 and neither stack starts. Pin it, and every tool agrees.
+ExecStart=__COMPOSE__ -p honcho up -d
+ExecStop=__COMPOSE__ -p honcho stop
+
+[Install]
+WantedBy=default.target

@@ -1918,6 +1918,35 @@ OLLAMAEOF
         fi
     fi
 
+    # ── gemma.service — llama.cpp vision backend on :11434 ────────────────────
+    #
+    # This is what hermes-vision sends screenshots to. The unit and its launcher
+    # ship here; the two things they need cannot. A GGUF is 6-13GB and a
+    # llama.cpp build is machine-specific (Vulkan vs ROCm vs CPU), so both stay
+    # out of git. Install the files always — they are inert without a model —
+    # and only enable the service once there is something for it to serve.
+    # Enabling a unit whose ExecStart cannot succeed just buys a restart loop.
+    GEMMA_PROV="$HYPR_DIR/provisioning/gemma"
+    if [ -d "$GEMMA_PROV" ]; then
+        mkdir -p "$HOME/models" "$HOME/.config/systemd/user"
+        cp "$GEMMA_PROV/gemma4-server.sh" "$HOME/models/gemma4-server.sh"
+        chmod +x "$HOME/models/gemma4-server.sh"
+        cp "$GEMMA_PROV/gemma.service.in" "$HOME/.config/systemd/user/gemma.service"
+        systemctl --user daemon-reload 2>/dev/null || true
+
+        GEMMA_BIN="${LLAMA_BIN:-$HOME/llama-cpp-turboquant/build-vulkan/bin/llama-server}"
+        if [ -x "$GEMMA_BIN" ] && [ -e "$HOME/models/gemma-active.gguf" ]; then
+            systemctl --user enable gemma.service >/dev/null 2>&1 \
+                && printf "  -> gemma.service enabled (:11434) %-13s ${C_GREEN}[ OK ]${RESET}\n" "" \
+                || step_warn "gemma.service not enabled" "systemctl --user enable gemma"
+        else
+            printf "  -> gemma.service installed, not enabled %-8s ${C_GREEN}[ OK ]${RESET}\n" ""
+            echo -e "     ${DIM}Needs a llama.cpp build at $GEMMA_BIN and a model symlinked"
+            echo -e "     to ~/models/gemma-active.gguf (plus ~/models/mmproj-gemma.gguf"
+            echo -e "     for vision). Then: systemctl --user enable --now gemma${RESET}"
+        fi
+    fi
+
     # ── Honcho (cross-session memory for Hermes) — third-party, containerised ──
     #
     # This step used to hang forever, and the reason is worth stating once: its
@@ -2137,6 +2166,42 @@ OLLAMAEOF
                         fi
                         if [ "$honcho_healthy" = true ]; then
                             printf "  -> Honcho stack up and healthy %-16s ${C_GREEN}[ OK ]${RESET}\n" ""
+
+                            # Hand ownership to a systemd unit. podman-restart
+                            # (enabled in the containers step) only restarts
+                            # containers that already exist; it cannot recreate
+                            # the stack after `podman rm`, and it knows nothing
+                            # about the compose file. honcho.service does both,
+                            # and gives `systemctl --user status honcho` an
+                            # answer. The unit pins -p honcho for the same
+                            # reason the command above does: different compose
+                            # implementations derive different container names
+                            # from the directory, and two projects then fight
+                            # over 127.0.0.1:5432.
+                            HONCHO_PROV="$HYPR_DIR/provisioning/honcho"
+                            if [ -f "$HONCHO_PROV/honcho.service.in" ]; then
+                                # systemd needs an absolute ExecStart. HONCHO_COMPOSE
+                                # is either one word (podman-compose) or two
+                                # (podman compose / docker compose), so resolve the
+                                # binary and keep any subcommand after it.
+                                _hc_bin="$(command -v "${HONCHO_COMPOSE%% *}")"
+                                if [ "$HONCHO_COMPOSE" = "${HONCHO_COMPOSE%% *}" ]; then
+                                    _hc_cmd="$_hc_bin"
+                                else
+                                    _hc_cmd="$_hc_bin ${HONCHO_COMPOSE#* }"
+                                fi
+                                mkdir -p "$HOME/.config/systemd/user"
+                                sed -e "s|__HONCHO_DIR__|$HONCHO_DIR|g" \
+                                    -e "s|__COMPOSE__|$_hc_cmd|g" \
+                                    "$HONCHO_PROV/honcho.service.in" \
+                                    > "$HOME/.config/systemd/user/honcho.service"
+                                systemctl --user daemon-reload 2>/dev/null || true
+                                if systemctl --user enable honcho.service >/dev/null 2>&1; then
+                                    printf "  -> honcho.service enabled (survives reboot) %-2s ${C_GREEN}[ OK ]${RESET}\n" ""
+                                else
+                                    step_warn "honcho.service not enabled" "systemctl --user enable honcho"
+                                fi
+                            fi
                         else
                             ( cd "$HONCHO_DIR" && timeout 30 $HONCHO_COMPOSE -p "$HONCHO_PROJECT" \
                                 logs --tail 40 ) </dev/null >>"$HONCHO_LOG" 2>&1 || true

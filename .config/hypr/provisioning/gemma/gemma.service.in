@@ -1,0 +1,34 @@
+[Unit]
+Description=Gemma llama.cpp backend on :11434 (Hermes, hermes-vision, Athena)
+After=network-online.target
+
+[Service]
+# Paths are %h-relative so this unit is machine-independent. Override any of
+# these with a drop-in: systemctl --user edit gemma.service
+#
+# GEMMA_MODEL   the GGUF to serve. %h/models/gemma-active.gguf is a symlink, so
+#               swapping models is `ln -sf <new>.gguf ~/models/gemma-active.gguf`
+#               followed by a restart.
+# GEMMA_MMPROJ  the vision projector. Without it the model is text-only and
+#               hermes-vision cannot describe a screenshot.
+# GEMMA_NCMOE   MoE experts of the first N layers kept in system RAM. 0 for a
+#               dense model. Raise to free VRAM, lower for speed.
+# GEMMA_CTX     context window. Raise until the VRAM margin is ~1GB.
+Environment=GEMMA_MODEL=%h/models/gemma-active.gguf
+Environment=GEMMA_MMPROJ=%h/models/mmproj-gemma.gguf
+Environment=GEMMA_NCMOE=0
+Environment=GEMMA_CTX=32768
+Environment=GEMMA_CTK=q8_0
+Environment=GEMMA_CTV=q8_0
+Environment=GEMMA_PORT=11434
+ExecStart=%h/models/gemma4-server.sh
+Restart=on-failure
+RestartSec=5
+# A cold model load off disk is slow; do not let systemd call it a failed start.
+TimeoutStartSec=240
+# llama-server flushes and exits cleanly on SIGINT; SIGTERM can leave the GPU
+# context wedged.
+KillSignal=SIGINT
+
+[Install]
+WantedBy=default.target
