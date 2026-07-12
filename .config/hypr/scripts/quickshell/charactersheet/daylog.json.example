@@ -1,0 +1,123 @@
+{
+  "_README": [
+    "DAY LOG — the character sheet's single input file. Copy this to `daylog.json`",
+    "(same folder) and let your pipeline keep it up to date.",
+    "",
+    "  daylog.json                     today, live",
+    "  history/day-YYYY-MM-DD.json     one archived day, SAME schema",
+    "",
+    "At the end of a day the pipeline just copies daylog.json into history/ and starts",
+    "a fresh one — there is one format everywhere, no conversion step. The ‹ › arrows",
+    "and the calendar button on every vital page read the history folder.",
+    "",
+    "daylog.json and history/ are GITIGNORED: they are personal health data. Only this",
+    "schema file is committed.",
+    "",
+    "CONTRACT",
+    "  date       YYYY-MM-DD. The widget ONLY applies the file when date === TODAY, so",
+    "             a stale log is ignored and the day resets on its own.",
+    "  trackers   the day's running TOTALS — the widget SETS them (it does not add), so",
+    "             the pipeline keeps the cumulative total and rewrites the file.",
+    "             Any group you omit keeps its previous value. Each group is merged",
+    "             key-by-key, so a partial write (just `steps`, say) is fine.",
+    "",
+    "  trackers.nutrition   → HP · calories, drinkCalories, protein/carbs/fat (g),",
+    "                              meals, mealTarget, quality (0-100)",
+    "  trackers.intake      → PP · waterMl, caffeineMg, ethanolUnits, sugarG,",
+    "                              sodiumMg, potassiumMg, magnesiumMg",
+    "  trackers.meds        → PP potions · { <potionKey>: dose } in that potion's unit.",
+    "                              Built in: ibuprofen(mg) paracetamol(mg) nyquil(ml)",
+    "                              antihistamine(mg) melatonin(mg). Add your own by",
+    "                              appending one entry to POTION_DEFS in LifeOsEngine.js.",
+    "  trackers.movement    → AP · zone2Min is THE AP number: minutes in the Zone-2",
+    "                              heart-rate band, against 60/day. Omit it (or null) and",
+    "                              the widget falls back to a guess — activeMin treated as",
+    "                              zone-2-ish, rendered with a '~' so an estimate never",
+    "                              masquerades as a measurement.",
+    "                              workoutLog → the WORKOUT tracker: sessions, each a list",
+    "                              of exercises with their sets. Volume (Σ kg×reps) and set",
+    "                              counts are COMPUTED — don't log them.",
+    "                              armsWorked/legsWorked (0-1) + armsDaysSince/legsDaysSince",
+    "                              drive the grey→red blood vessels on the figure.",
+    "  trackers.sleep       → EP hypnogram · { screensOff, bedtime, segments:[{stage,min}] }",
+    "                              stage = awake|rem|core|deep, IN ORDER from bedtime.",
+    "                              Wake time, durations, architecture % and sleep quality",
+    "                              are all DERIVED from the segments, so the graph and the",
+    "                              gauge can never disagree. screensOff is when your devices",
+    "                              went dark — the gap to bedtime is the wind-down band.",
+    "  trackers.biometrics  → EP / MP / SP · rhr + hrv drive stress and the Zone-2 band;",
+    "                              the sleep* fields here are a FALLBACK, overridden by",
+    "                              trackers.sleep when a hypnogram is logged.",
+    "  trackers.environment → PP heat bonus (tempC, humidity)",
+    "  trackers.affect      → MP mood (observed valence/arousal, reactivity)",
+    "",
+    "  mealLog    HP meal list: breakfast / lunch / dinner / snacks, each",
+    "             { items:[strings], kcal }. A slot with no items simply isn't shown.",
+    "  pending    low-confidence items the pipeline couldn't resolve — surfaced for you",
+    "             to confirm; NOT counted until you move them into the totals.",
+    "",
+    "Every value below is zeroed. Fill in what you actually track; leave the rest."
+  ],
+
+  "date": "1970-01-01",
+
+  "trackers": {
+    "nutrition": {
+      "calories": 0, "drinkCalories": 0,
+      "protein": 0, "carbs": 0, "fat": 0,
+      "meals": 0, "mealTarget": 3, "quality": 0
+    },
+
+    "intake": {
+      "waterMl": 0, "caffeineMg": 0, "ethanolUnits": 0, "sugarG": 0,
+      "sodiumMg": 0, "potassiumMg": 0, "magnesiumMg": 0
+    },
+
+    "meds": {},
+
+    "movement": {
+      "steps": 0, "stepTarget": 9000,
+      "activeMin": 0, "activeTarget": 45,
+      "zone2Min": null,
+      "workoutLog": [
+        {
+          "name": "Example Session",
+          "minutes": 0,
+          "exercises": [
+            { "name": "Bench Press", "sets": [ { "kg": 0, "reps": 0 },
+                                               { "kg": 0, "reps": 0, "pr": false } ] },
+            { "name": "Treadmill",   "cardio": { "minutes": 0, "km": 0, "avgHr": 0 } }
+          ]
+        }
+      ],
+      "workouts": 0, "workoutTarget": 1,
+      "armsWorked": 0, "legsWorked": 0,
+      "armsDaysSince": 0, "legsDaysSince": 0
+    },
+
+    "sleep": {
+      "screensOff": "",
+      "bedtime": "",
+      "segments": []
+    },
+
+    "biometrics": {
+      "sleepHours": 0, "deepPct": 0, "remPct": 0, "sleepLatencyMin": 0,
+      "rhr": 60, "hrv": 50, "hrvBaseline": 55,
+      "screenMin": 0, "lateNightMsgs": 0, "taskSwitches": 0
+    },
+
+    "environment": { "tempC": 20, "humidity": 50 },
+
+    "affect": { "observed": null, "reactivity": 0 }
+  },
+
+  "mealLog": {
+    "breakfast": { "items": [], "kcal": 0 },
+    "lunch":     { "items": [], "kcal": 0 },
+    "dinner":    { "items": [], "kcal": 0 },
+    "snacks":    { "items": [], "kcal": 0 }
+  },
+
+  "pending": []
+}
